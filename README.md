@@ -77,8 +77,8 @@ srun --mpi=pmix --ntasks=4 ./bin/train --data <path>/cifar-10-batches-bin --allr
 
 | Member | Role |
 |---|---|
-| Alex Ye | [kernels or communication] |
-| [Teammate name] | [kernels or communication] |
+| Alex Ye | Kernels (T1) |
+| Shaozhe Zhang | Communication (T2) |
 
 - **Kernels:** GEMM variants, layer kernels, mixed precision, kernel profiling
 - **Communication:** all-reduce algorithms, overlap, pipeline and 2D parallelism, scaling runs
