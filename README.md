@@ -2,7 +2,7 @@
 
 Final project for CSCI 596 (Scientific Computing and Visualization), Fall 2026.
 
-> **Status:** Milestone 1 in progress. GEMM and layer kernels, the MLP, the single-GPU trainer (46% CIFAR-10 test accuracy after 5 epochs), the all-reduce algorithms, the CIFAR-10 loader and the communication benchmark are implemented and tested. Next: checking that multi-GPU training matches the 1-GPU loss curve. See the [design spec](docs/superpowers/specs/2026-10-28-mini-ddp-cuda-mpi-design.md) and the [Milestone 1 plan](docs/superpowers/plans/2026-10-28-mini-ddp-milestone1.md).
+> **Status:** Milestone 1 complete. GEMM and layer kernels, the MLP, the single-GPU trainer (46% CIFAR-10 test accuracy after 5 epochs), the all-reduce algorithms, the CIFAR-10 loader and the communication benchmark are implemented and tested. Data-parallel training reproduces the 1-GPU loss curve with every all-reduce algorithm on 2 GPUs (one node) and 4 GPUs (two nodes over InfiniBand). Next: overlapping gradient all-reduce with backprop, and the first 1 → 8 GPU scaling plot. See the [design spec](docs/superpowers/specs/2026-10-28-mini-ddp-cuda-mpi-design.md) and the [Milestone 1 plan](docs/superpowers/plans/2026-10-28-mini-ddp-milestone1.md).
 
 ## Problem
 
@@ -51,7 +51,7 @@ All configurations must reach the same test accuracy as the 1-GPU run. An MLP on
 
 ## Build and Run
 
-> Single-GPU training and all tests below work today. The multi-GPU command is the interface from the [Milestone 1 plan](docs/superpowers/plans/2026-10-28-mini-ddp-milestone1.md) and is still being validated.
+> Everything below works today. Multi-node jobs need `--partition=gpu`, because the `debug` partition only allows one node.
 
 **Dependencies:** C compiler, OpenMPI, CUDA toolkit (with cuBLAS), Make. Runs on CARC Discovery (P100, V100, A100, A40 or L40S).
 
@@ -69,8 +69,14 @@ sbatch --account=<class account> scripts/slurm/run.sh ./bin/test_mlp
 # Train on 1 GPU (reaches ~0.46 test accuracy, ~2.6 ms/step on an A40)
 ./bin/train --data <path>/cifar-10-batches-bin --epochs 5 --batch 256 --hidden 1024 --layers 2 --lr 0.02
 
-# Data-parallel on 4 GPUs across 2 nodes, with ring all-reduce
-srun --mpi=pmix --ntasks=4 ./bin/train --data <path>/cifar-10-batches-bin --allreduce ring
+# Check that N-GPU training matches 1 GPU, for every all-reduce algorithm (prints 4 PASS lines)
+sbatch --account=<class account> scripts/slurm/run.sh scripts/test_dp.sh 2
+sbatch --account=<class account> --partition=gpu --nodes=2 --ntasks=4 --ntasks-per-node=2 \
+  scripts/slurm/run.sh scripts/test_dp.sh 4
+
+# Data-parallel on 4 GPUs across 2 nodes, with ring all-reduce (--batch must divide by the GPU count)
+sbatch --account=<class account> --partition=gpu --nodes=2 --ntasks=4 --ntasks-per-node=2 \
+  scripts/slurm/run.sh srun --mpi=pmix ./bin/train --data <path>/cifar-10-batches-bin --allreduce ring
 ```
 
 ## Team
@@ -86,7 +92,7 @@ srun --mpi=pmix --ntasks=4 ./bin/train --data <path>/cifar-10-batches-bin --allr
 ## Milestones
 
 - [x] Oct 28 — topic chosen, design spec and Milestone 1 plan written
-- [ ] Nov 10 — data-parallel training matches the 1-GPU loss curve
+- [x] Nov 10 — data-parallel training matches the 1-GPU loss curve (done Nov 5: 2 and 4 GPUs, all four all-reduce algorithms)
 - [ ] Nov 17 — overlap + bucketing; first 1 → 8 GPU scaling plot
 - [x] Nov 20 — agree on topic with the instructor (discussed and agreed)
 - [ ] Nov 24 — tensor-core FP16 GEMM; GPipe pipeline
