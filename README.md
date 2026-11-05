@@ -88,7 +88,7 @@ srun --mpi=pmix --ntasks=4 ./bin/train --data <path>/cifar-10-batches-bin --allr
 - [x] Oct 28 — topic chosen, design spec and Milestone 1 plan written
 - [ ] Nov 10 — data-parallel training matches the 1-GPU loss curve
 - [ ] Nov 17 — overlap + bucketing; first 1 → 8 GPU scaling plot
-- [ ] Nov 20 — agree on topic with the instructor
+- [x] Nov 20 — agree on topic with the instructor (discussed and agreed)
 - [ ] Nov 24 — tensor-core FP16 GEMM; GPipe pipeline
 - [ ] Nov 30 / Dec 2 — one-minute in-class presentation (from this repo)
 - [ ] Dec 11 — final repo due; submit URL to Brightspace
