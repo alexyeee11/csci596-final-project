@@ -1,31 +1,24 @@
 #!/bin/bash
-#SBATCH --job-name=bench-comm
-#SBATCH --partition=main
-#SBATCH --nodes=8
-#SBATCH --ntasks-per-node=2
-#SBATCH --cpus-per-task=1
-#SBATCH --mem=8G
-#SBATCH --time=00:30:00
-#SBATCH --output=logs/%x-%j.out
-# usage: mkdir -p logs && sbatch --account=<class account> scripts/slurm/bench_comm_sweep.sh
-# runs bench_comm (CPU only, no GPUs) at the GPU jobs' layouts, one CSV per layout, for Task 3 (E3)
-# cost: ~32 SU per minute while running (16 CPU + 8 x 8 GB)
+# usage (login node): source scripts/env.sh && make cpu && mkdir -p logs && scripts/slurm/bench_comm_sweep.sh <class account>
+# submits bench_comm (CPU only, no GPUs) at the GPU jobs' layouts for Task 3 (E3): one job per layout, so each srun
+# spans its whole allocation. --dependency=singleton runs them one at a time so they don't share the network.
+# cost: 1 SU per CPU + 2 per node per minute, ~32 SU/min for the 16-rank job; each job takes a few minutes.
+# main mixes node generations (epyc + HDR100/HDR200 InfiniBand, xeon-4116 + FDR56), and one fitted model only
+# describes one of them, so every job is pinned to one node feature. The default, fdr56, is the network of the
+# P100 (and V100) GPU nodes the training runs use. Override with CONSTRAINT=<feature>, e.g. CONSTRAINT='epyc-7513&hdr200'.
 set -euo pipefail
-source scripts/env.sh
-make bin/bench_comm
-mkdir -p results/comm
+account=$1
+constraint=${CONSTRAINT:-fdr56}
+test -x bin/bench_comm || { echo "build first: make cpu"; exit 1; }
 
-# run NAME NODES RANKS: bench_comm on RANKS ranks spread evenly over NODES nodes
-run() {
-  local name=$1 nodes=$2 ranks=$3
-  local opts=(--mpi="$SRUN_MPI" --nodes="$nodes" --ntasks="$ranks" --ntasks-per-node=$((ranks / nodes)))
-  echo "== $name: $ranks ranks on $nodes node(s): $(srun "${opts[@]}" hostname -s | sort | uniq -c | xargs)"
-  srun "${opts[@]}" ./bin/bench_comm > "results/comm/$name.csv"
-  echo "$(wc -l < "results/comm/$name.csv") lines (expect 71)"
+# sub NAME NODES RANKS_PER_NODE -> results/comm/NAME.csv
+sub() {
+  sbatch --account="$account" --dependency=singleton --constraint="$constraint" \
+    --nodes="$2" --ntasks-per-node="$3" scripts/slurm/bench_comm.sh "$1"
 }
 
-run intra_np2     1 2
-run inter_np2     2 2
-run allreduce_np4 2 4
-run allreduce_np8 4 8
-run allreduce_np16 8 16
+sub intra_np2      1 2
+sub inter_np2      2 1
+sub allreduce_np4  2 2
+sub allreduce_np8  4 2
+sub allreduce_np16 8 2
