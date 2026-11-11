@@ -1,0 +1,3 @@
+intra alpha_s=4.7400e-07 beta_s_per_byte=7.3226e-11
+inter alpha_s=1.8400e-06 beta_s_per_byte=5.0525e-11
+reduce gamma_s_per_byte=2.5991e-10
