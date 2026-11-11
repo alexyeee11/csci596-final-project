@@ -32,13 +32,17 @@ int main(void) {
       const shape* h = &shapes[s];
       gemm((gemm_impl)i, h->ta, h->tb, h->M, h->N, h->K, 1.f, A, B, 0.f, C);  /* warm-up */
       CUDA_CHECK(cudaDeviceSynchronize());
+      /* average R back-to-back calls so launch/event overhead doesn't dominate small shapes;
+         naive on big shapes takes seconds per call, so it runs once */
+      int R = (i == GEMM_NAIVE && (double)h->M * h->N * h->K > 1e9) ? 1 : 10;
       CUDA_CHECK(cudaEventRecord(e0));
-      gemm((gemm_impl)i, h->ta, h->tb, h->M, h->N, h->K, 1.f, A, B, 0.f, C);
+      for (int r = 0; r < R; r++)
+        gemm((gemm_impl)i, h->ta, h->tb, h->M, h->N, h->K, 1.f, A, B, 0.f, C);
       CUDA_CHECK(cudaEventRecord(e1));
       CUDA_CHECK(cudaEventSynchronize(e1));
       float ms;
       CUDA_CHECK(cudaEventElapsedTime(&ms, e0, e1));
-      double t = ms / 1e3;
+      double t = ms / 1e3 / R;
       printf("%s,%d,%d,%d,%d,%d,%.6f,%.2f\n", names[i], h->M, h->N, h->K, h->ta, h->tb, t,
              2.0 * h->M * h->N * h->K / t / 1e9);
     }
