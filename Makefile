@@ -14,7 +14,7 @@ KERNELS   = build/gemm.o build/layers.o build/mlp.o
 
 .PHONY: cpu gpu check-cpu clean
 cpu: bin/test_allreduce bin/test_cifar bin/bench_comm
-gpu: cpu bin/smoke bin/test_gemm bin/test_layers bin/test_mlp bin/train
+gpu: cpu bin/smoke bin/test_gemm bin/test_layers bin/test_mlp bin/train bin/bench_gemm
 
 bin build:
 	mkdir -p $@
@@ -37,6 +37,8 @@ bin/test_gemm: tests/test_gemm.cu build/gemm.o | bin
 bin/test_layers: tests/test_layers.cu build/layers.o | bin
 	$(NVCC) $(NVFLAGS) $^ -o $@
 bin/test_mlp: tests/test_mlp.cu $(KERNELS) | bin
+	$(NVCC) $(NVFLAGS) $^ -o $@ -lcublas
+bin/bench_gemm: bench/bench_gemm.cu build/gemm.o | bin
 	$(NVCC) $(NVFLAGS) $^ -o $@ -lcublas
 bin/train: src/train.c src/comm/allreduce.c src/data/cifar.c $(KERNELS) | bin
 	$(MPICC) $(CFLAGS) $(GPU_INC) $^ -o $@ $(GPU_LIBS)
