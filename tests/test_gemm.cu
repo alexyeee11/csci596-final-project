@@ -21,11 +21,18 @@ static void ref(int ta, int tb, int M, int N, int K, float alpha, const float* A
 }
 
 int main(void) {
-  const int shapes[][3] = {{1, 1, 1}, {33, 17, 65}, {128, 256, 64}, {257, 129, 300}};
-  const char* names[] = {"naive", "tiled", "cublas"};
+  /* 300x400x129 spans several 128x128 regtile blocks with ragged edges in M, N and K */
+  const int shapes[][3] = {{1, 1, 1}, {33, 17, 65}, {128, 256, 64}, {257, 129, 300}, {300, 400, 129}};
+  const char* names[] = {"naive", "tiled", "regtile", "cublas"};
   int fails = 0;
-  for (int impl = 0; impl < 3; impl++)
-    for (int s = 0; s < 4; s++)
+  /* an unparsed name would silently fall through to the tiled kernel and still pass below */
+  for (int impl = 0; impl < 4; impl++)
+    if (gemm_parse(names[impl]) != impl) {
+      printf("FAIL gemm_parse(\"%s\") = %d, want %d\n", names[impl], gemm_parse(names[impl]), impl);
+      fails++;
+    }
+  for (int impl = 0; impl < 4; impl++)
+    for (int s = 0; s < 5; s++)
       for (int ta = 0; ta < 2; ta++)
         for (int tb = 0; tb < 2; tb++) {
           int M = shapes[s][0], N = shapes[s][1], K = shapes[s][2];

@@ -17,7 +17,7 @@ typedef struct {
 static void usage(void) {
   fprintf(stderr,
           "usage: train (--data DIR | --synthetic) [--epochs N] [--steps N] [--batch N] [--hidden N]\n"
-          "             [--layers N] [--lr X] [--seed N] [--gemm naive|tiled|cublas]\n"
+          "             [--layers N] [--lr X] [--seed N] [--gemm naive|tiled|regtile|cublas]\n"
           "             [--allreduce naive|tree|ring|mpi]\n");
   exit(2);
 }
