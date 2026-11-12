@@ -4,6 +4,7 @@
 #include <string.h>
 #include <time.h>
 #include "comm/allreduce.h"
+#include "comm/nccl.h"
 #include "comm/overlap.h"
 #include "cuda_check.h"
 #include "data/cifar.h"
@@ -11,7 +12,7 @@
 
 typedef struct {
   const char* data;
-  int synthetic, epochs, steps, batch, hidden, layers, gemm, allreduce, overlap;
+  int synthetic, epochs, steps, batch, hidden, layers, gemm, allreduce, nccl, overlap;
   float lr, bucket_mb;
   unsigned seed;
 } Opts;
@@ -20,12 +21,12 @@ static void usage(void) {
   fprintf(stderr,
           "usage: train (--data DIR | --synthetic) [--epochs N] [--steps N] [--batch N] [--hidden N]\n"
           "             [--layers N] [--lr X] [--seed N] [--gemm naive|tiled|regtile|cublas]\n"
-          "             [--allreduce naive|tree|ring|mpi] [--overlap [--bucket-mb X]]\n");
+          "             [--allreduce naive|tree|ring|mpi|nccl] [--overlap [--bucket-mb X]]\n");
   exit(2);
 }
 
 static Opts parse(int argc, char** argv) {
-  Opts o = {NULL, 0, 1, 0, 256, 4096, 3, GEMM_TILED, AR_RING, 0, 0.01f, 25.f, 42};
+  Opts o = {NULL, 0, 1, 0, 256, 4096, 3, GEMM_TILED, AR_RING, 0, 0, 0.01f, 25.f, 42};
   for (int i = 1; i < argc; i++) {
     const char* a = argv[i];
     if (!strcmp(a, "--synthetic")) { o.synthetic = 1; continue; }
@@ -42,6 +43,7 @@ static Opts parse(int argc, char** argv) {
     else if (!strcmp(a, "--bucket-mb")) { if ((o.bucket_mb = (float)atof(v)) <= 0) usage(); }
     else if (!strcmp(a, "--seed")) o.seed = (unsigned)atoi(v);
     else if (!strcmp(a, "--gemm")) { if ((o.gemm = gemm_parse(v)) < 0) usage(); }
+    else if (!strcmp(a, "--allreduce") && !strcmp(v, "nccl")) o.nccl = 1;
     else if (!strcmp(a, "--allreduce")) { if ((o.allreduce = ar_parse(v)) < 0) usage(); }
     else usage();
   }
@@ -104,6 +106,11 @@ int main(int argc, char** argv) {
     if (!rank) fprintf(stderr, "--overlap needs MPI_THREAD_SERIALIZED; this MPI provides level %d\n", provided);
     MPI_Abort(MPI_COMM_WORLD, 2);
   }
+  if (o.nccl && o.overlap) {
+    if (!rank) fprintf(stderr, "--overlap stages buckets through host memory; it does not combine with --allreduce nccl\n");
+    MPI_Abort(MPI_COMM_WORLD, 2);
+  }
+  if (o.nccl) nccl_init(MPI_COMM_WORLD);  /* exits with a message when built without NCCL */
   if (o.batch % p) {
     if (!rank) fprintf(stderr, "--batch %d is not divisible by %d ranks\n", o.batch, p);
     MPI_Abort(MPI_COMM_WORLD, 2);
@@ -137,7 +144,7 @@ int main(int argc, char** argv) {
   if (p > 1 && o.overlap) {
     size_t bucket = (size_t)(o.bucket_mb * (1 << 20) / sizeof(float));
     ov = overlap_create(m->grads, m->nparams, bucket ? bucket : 1, (ar_algo)o.allreduce, MPI_COMM_WORLD, lrank % ndev);
-  } else if (p > 1)
+  } else if (p > 1 && !o.nccl)
     CUDA_CHECK(cudaMallocHost((void**)&hgrad, m->nparams * sizeof(float)));
   int* perm = malloc(train.n * sizeof(int));
 
@@ -163,6 +170,8 @@ int main(int argc, char** argv) {
       double t1 = now();
       if (ov) {
         overlap_wait(ov);
+      } else if (p > 1 && o.nccl) {
+        nccl_allreduce_sum(m->grads, m->nparams);
       } else if (p > 1) {
         CUDA_CHECK(cudaMemcpy(hgrad, m->grads, m->nparams * sizeof(float), cudaMemcpyDeviceToHost));
         allreduce_sum(hgrad, m->nparams, (ar_algo)o.allreduce, MPI_COMM_WORLD);
@@ -189,6 +198,7 @@ int main(int argc, char** argv) {
   cudaFree(dX); cudaFree(dy);
   if (hgrad) cudaFreeHost(hgrad);
   if (ov) overlap_free(ov);
+  if (o.nccl) nccl_finalize();
   mlp_free(m);
   dataset_free(&train);
   dataset_free(&test);
