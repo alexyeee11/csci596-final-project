@@ -15,7 +15,8 @@ set -euo pipefail
 source scripts/env.sh
 ALGO=${ALGO:-ring}
 BUCKET_MB=${BUCKET_MB:-25}
-ARGS="--synthetic --steps 30 --batch 512 --gemm regtile --allreduce $ALGO"  # default --hidden 4096 --layers 3
+# synthetic data is 4096 samples = 8 steps per epoch at batch 512, so 4 epochs to reach 30 steps
+ARGS="--synthetic --epochs 4 --steps 30 --batch 512 --gemm regtile --allreduce $ALGO"  # default --hidden 4096 --layers 3
 mkdir -p results/overlap
 srun --mpi="$SRUN_MPI" ./bin/train $ARGS > results/overlap/off.log
 srun --mpi="$SRUN_MPI" ./bin/train $ARGS --overlap --bucket-mb "$BUCKET_MB" > results/overlap/on.log
