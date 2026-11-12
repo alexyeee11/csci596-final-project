@@ -40,8 +40,12 @@ bin/test_mlp: tests/test_mlp.cu $(KERNELS) | bin
 	$(NVCC) $(NVFLAGS) $^ -o $@ -lcublas
 bin/bench_gemm: bench/bench_gemm.cu build/gemm.o | bin
 	$(NVCC) $(NVFLAGS) $^ -o $@ -lcublas
-bin/train: src/train.c src/comm/allreduce.c src/comm/overlap.c src/data/cifar.c $(KERNELS) | bin
-	$(MPICC) $(CFLAGS) $(GPU_INC) $^ -o $@ $(GPU_LIBS) -lpthread
+# NCCL is optional: set NCCL_HOME (scripts/env.sh does on CARC) to build --allreduce nccl. It is dlopen'ed at run
+# time rather than linked (see src/comm/nccl.c), so only its headers are used here.
+NCCL_FLAGS = $(if $(NCCL_HOME),-DHAVE_NCCL -I$(NCCL_HOME)/include -DNCCL_LIB='"$(NCCL_HOME)/lib/libnccl.so.2"')
+NCCL_LIBS  = $(if $(NCCL_HOME),-ldl)
+bin/train: src/train.c src/comm/allreduce.c src/comm/overlap.c src/comm/nccl.c src/data/cifar.c $(KERNELS) | bin
+	$(MPICC) $(CFLAGS) $(GPU_INC) $(NCCL_FLAGS) $^ -o $@ $(NCCL_LIBS) $(GPU_LIBS) -lpthread
 
 check-cpu: cpu
 	./bin/test_cifar
