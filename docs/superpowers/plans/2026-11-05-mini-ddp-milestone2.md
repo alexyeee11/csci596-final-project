@@ -199,7 +199,7 @@ void overlap_free(Overlap* o);
 ### Task 6: 1 → 8 GPU scaling sweep and plot — E4, E5 (Alex; Shaozhe reviews)
 
 **Interfaces:**
-- `scripts/slurm/sweep_scaling.sh`: one job on 4 nodes × 2 P100s in `--partition=gpu`. It writes `results/scaling/{strong,weak}_n{1,2,4,8}_{off,on}.log`, which is 16 runs. `ALGO` is an environment override, default `ring`.
+- `scripts/slurm/sweep_scaling_submit.sh <account> [N...]` submits `scripts/slurm/sweep_scaling.sh N` as one job per GPU count (1×1, 1×2, 2×2, 4×2 P100s in `--partition=gpu`), because an `srun` on a subset of a multi-node allocation fails in MPI start-up on Discovery. Together they write `results/scaling/{strong,weak}_n{1,2,4,8}_{off,on}.log`, which is 16 runs. `ALGO` is an environment override, default `ring`.
 - `scripts/plot_scaling.py results/scaling` writes `summary.csv` (`kind,overlap,np,compute_s,comm_s,step_s,speedup,efficiency`) and `scaling.png`.
 
 **Configuration:**
