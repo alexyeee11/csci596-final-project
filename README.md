@@ -2,7 +2,7 @@
 
 Final project for CSCI 596 (Scientific Computing and Visualization), Fall 2026.
 
-> **Status:** Milestone 1 complete. GEMM and layer kernels, the MLP, the single-GPU trainer (46% CIFAR-10 test accuracy after 5 epochs), the all-reduce algorithms, the CIFAR-10 loader and the communication benchmark are implemented and tested. Data-parallel training reproduces the 1-GPU loss curve with every all-reduce algorithm on 2 GPUs (one node) and 4 GPUs (two nodes over InfiniBand). Next: overlapping gradient all-reduce with backprop, and the first 1 → 8 GPU scaling plot. See the [design spec](docs/superpowers/specs/2026-10-28-mini-ddp-cuda-mpi-design.md) and the [Milestone 1 plan](docs/superpowers/plans/2026-10-28-mini-ddp-milestone1.md).
+> **Status:** Milestone 2 complete. On top of Milestone 1 (kernels, MLP, trainer, hand-written all-reduce, data-parallel training that matches the 1-GPU loss curve), we added a register-tiled GEMM (3.1× our tiled kernel, 63% of cuBLAS on a P100), an α–β model of all-reduce cost, bucketed all-reduce overlapped with backprop, an NCCL baseline, and the first 1 → 8 GPU scaling sweep. Next: tensor-core FP16 GEMM and GPipe pipeline parallelism. See the [design spec](docs/superpowers/specs/2026-10-28-mini-ddp-cuda-mpi-design.md) and the plans for [Milestone 1](docs/superpowers/plans/2026-10-28-mini-ddp-milestone1.md) and [Milestone 2](docs/superpowers/plans/2026-11-05-mini-ddp-milestone2.md).
 
 ## Problem
 
@@ -49,6 +49,11 @@ One MPI rank drives one GPU. The model is an MLP for CIFAR-10 (3072 → 4096 →
 
 All configurations must reach the same test accuracy as the 1-GPU run. An MLP on CIFAR-10 tops out around 55%, so the point is matching accuracy, not high accuracy.
 
+**First measurements (P100):**
+- [GEMM GFLOP/s](results/gemm/p100.png): register tiling is 3.1× the shared-memory tiled kernel at 4096³ and reaches 63% of cuBLAS.
+- [All-reduce cost vs. the α–β model](results/comm/allreduce_model.png), with the fitted parameters in [alpha_beta.txt](results/comm/alpha_beta.txt).
+- [Strong and weak scaling, 1 → 8 GPUs](results/scaling/scaling.png) ([summary.csv](results/scaling/summary.csv)): with ~152 MB of gradients and only ~17 ms of compute per step, the host-staged all-reduce dominates, so 8 GPUs are ~6× slower per step than 1. Overlap hides 15–18% of the step. Every strong-scaling run ends at the same loss as the 1-GPU run.
+
 ## Build and Run
 
 > Everything below works today. Multi-node jobs need `--partition=gpu`, because the `debug` partition only allows one node.
@@ -93,7 +98,7 @@ sbatch --account=<class account> --partition=gpu --nodes=2 --ntasks=4 --ntasks-p
 
 - [x] Oct 28 — topic chosen, design spec and Milestone 1 plan written
 - [x] Nov 10 — data-parallel training matches the 1-GPU loss curve (done Nov 5: 2 and 4 GPUs, all four all-reduce algorithms)
-- [ ] Nov 17 — overlap + bucketing; first 1 → 8 GPU scaling plot
+- [x] Nov 17 — overlap + bucketing; first 1 → 8 GPU scaling plot
 - [x] Nov 20 — agree on topic with the instructor (discussed and agreed)
 - [ ] Nov 24 — tensor-core FP16 GEMM; GPipe pipeline
 - [ ] Nov 30 / Dec 2 — one-minute in-class presentation (from this repo)
