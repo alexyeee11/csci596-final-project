@@ -40,9 +40,11 @@ b.axhline(1, color="k", ls="--", label="ideal")
 a.set(xlabel="GPUs", ylabel="speedup", title="Strong scaling (batch 512)", xscale="log", yscale="log")
 b.set(xlabel="GPUs", ylabel="t(1) / t(N)", title="Weak scaling (128 per GPU)", xscale="log", ylim=(0, 1.1))
 for ax in (a, b):
-    ax.set_xticks(NS)
-    ax.set_xticklabels(NS)
+    ax.set_xticks(NS, [str(n) for n in NS])
+    ax.set_xticks([], minor=True)  # no 3x10^0-style labels between 1, 2, 4, 8
     ax.legend()
+a.set_yticks([0.1, 0.2, 0.5, 1, 2, 4, 8], ["0.1", "0.2", "0.5", "1", "2", "4", "8"])
+a.set_yticks([], minor=True)
 w = 0.38
 for j, ov in enumerate(("off", "on")):
     r = get("strong", ov)

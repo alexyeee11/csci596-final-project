@@ -1,0 +1,34 @@
+step 0 loss 2.292563 compute_s 0.017068 comm_s 0.254199 step_s 0.272359
+step 1 loss 1.732953 compute_s 0.016657 comm_s 0.225082 step_s 0.242781
+step 2 loss 1.286987 compute_s 0.016624 comm_s 0.219075 step_s 0.236766
+step 3 loss 0.973227 compute_s 0.016608 comm_s 0.218000 step_s 0.235650
+step 4 loss 0.731989 compute_s 0.016569 comm_s 0.217567 step_s 0.235176
+step 5 loss 0.568692 compute_s 0.016601 comm_s 0.218387 step_s 0.236029
+step 6 loss 0.442469 compute_s 0.016606 comm_s 0.218320 step_s 0.235968
+step 7 loss 0.359854 compute_s 0.016609 comm_s 0.218105 step_s 0.235786
+epoch 0 test_acc 1.0000
+step 8 loss 0.299102 compute_s 0.015528 comm_s 0.214179 step_s 0.230748
+step 9 loss 0.256813 compute_s 0.015390 comm_s 0.219818 step_s 0.236254
+step 10 loss 0.218046 compute_s 0.015405 comm_s 0.223198 step_s 0.239653
+step 11 loss 0.194473 compute_s 0.015409 comm_s 0.222709 step_s 0.239161
+step 12 loss 0.170508 compute_s 0.015370 comm_s 0.219354 step_s 0.235795
+step 13 loss 0.154652 compute_s 0.015444 comm_s 0.218616 step_s 0.235104
+step 14 loss 0.137969 compute_s 0.015371 comm_s 0.219999 step_s 0.236411
+step 15 loss 0.127632 compute_s 0.015403 comm_s 0.220228 step_s 0.236674
+epoch 1 test_acc 1.0000
+step 16 loss 0.113711 compute_s 0.015428 comm_s 0.214602 step_s 0.231073
+step 17 loss 0.108724 compute_s 0.015348 comm_s 0.218745 step_s 0.235138
+step 18 loss 0.098315 compute_s 0.015322 comm_s 0.221240 step_s 0.237603
+step 19 loss 0.093154 compute_s 0.015332 comm_s 0.220298 step_s 0.236672
+step 20 loss 0.086760 compute_s 0.015325 comm_s 0.224107 step_s 0.240502
+step 21 loss 0.081150 compute_s 0.015350 comm_s 0.219282 step_s 0.235673
+step 22 loss 0.077275 compute_s 0.015335 comm_s 0.219384 step_s 0.235760
+step 23 loss 0.073173 compute_s 0.015356 comm_s 0.220052 step_s 0.236452
+epoch 2 test_acc 1.0000
+step 24 loss 0.068834 compute_s 0.015298 comm_s 0.213814 step_s 0.230156
+step 25 loss 0.065026 compute_s 0.015295 comm_s 0.219402 step_s 0.235740
+step 26 loss 0.061364 compute_s 0.015314 comm_s 0.220360 step_s 0.236713
+step 27 loss 0.059232 compute_s 0.015303 comm_s 0.219361 step_s 0.235709
+step 28 loss 0.056522 compute_s 0.015302 comm_s 0.219888 step_s 0.236230
+step 29 loss 0.053380 compute_s 0.015308 comm_s 0.223449 step_s 0.239838
+epoch 3 test_acc 1.0000
