@@ -3,7 +3,8 @@
 extern "C" {
 #endif
 
-typedef enum { GEMM_NAIVE, GEMM_TILED, GEMM_REGTILE, GEMM_CUBLAS } gemm_impl;
+/* GEMM_WMMA is FP16-only (see gemm_h.h); gemm() exits on it */
+typedef enum { GEMM_NAIVE, GEMM_TILED, GEMM_REGTILE, GEMM_CUBLAS, GEMM_WMMA } gemm_impl;
 
 int gemm_parse(const char* s);  /* -1 if unknown */
 /* Row-major, device pointers: C[MxN] = alpha * op(A)[MxK] * op(B)[KxN] + beta * C.

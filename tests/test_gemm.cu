@@ -9,7 +9,7 @@
 static unsigned seed = 1;
 static float rnd(void) { seed = seed * 1664525u + 1013904223u; return ((seed >> 8) / 16777216.0f) * 2.f - 1.f; }
 
-/* scale (if not NULL) gets alpha * sum|a||b| + |beta * C| per element: the size FP32 accumulation error scales with */
+/* scale gets alpha * sum|a||b| + |beta * C| per element: the size FP32 accumulation error scales with */
 static void ref(int ta, int tb, int M, int N, int K, float alpha, const float* A, const float* B, float beta,
                 float* C, float* scale) {
   for (int i = 0; i < M; i++)
@@ -22,7 +22,7 @@ static void ref(int ta, int tb, int M, int N, int K, float alpha, const float* A
         s += fabs((double)a * b);
       }
       size_t c = (size_t)i * N + j;
-      if (scale) scale[c] = (float)(alpha * s + fabs(beta * C[c]));
+      scale[c] = (float)(alpha * s + fabs(beta * C[c]));
       C[c] = (float)(alpha * acc + beta * C[c]);
     }
 }

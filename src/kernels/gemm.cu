@@ -1,7 +1,10 @@
 #include <cublas_v2.h>
+#include <mma.h>
 #include <string.h>
+#include <type_traits>
 #include "cuda_check.h"
 #include "kernels/gemm.h"
+#include "kernels/gemm_h.h"
 
 #define TILE 32
 
@@ -91,6 +94,88 @@ __global__ void __launch_bounds__(256) gemm_regtile_k(int ta, int tb, int M, int
   }
 }
 
+/* FP16 tensor-core GEMM: 64x64 block tile, K-step 32, 128 threads = 4 warps, each warp owning a 32x32 output
+   (2x2 16x16x16 fragments). Tiles are staged in shared memory in their stored orientation (coalesced loads),
+   so a transposed operand is just a col_major fragment view. Rows are padded by 8 halves, which keeps ldm a
+   multiple of 8 and every fragment pointer 32-byte aligned (all offsets are multiples of 16 halves), whatever
+   the global shape or leading dimension.
+   ponytail: scalar 2-byte staging loads with bounds checks; vectorize for aligned shapes if bench_gemm needs it. */
+#define WT 64
+#define WK 32
+#define WPAD 8
+#define WLDC (WT + 4)  /* FP32 epilogue tile row stride: multiple of 4 floats, fragment offsets multiples of 8 */
+
+/* Copy the R x C tile at (r0, c0) of a rows x cols row-major matrix into s (row stride C + WPAD), zero-filling
+   outside the matrix. */
+template <int R, int C>
+__device__ __forceinline__ void wmma_stage(__half* s, const __half* g, int rows, int cols, int r0, int c0) {
+#pragma unroll
+  for (int t = 0; t < R * C / 128; t++) {
+    int idx = threadIdx.x + t * 128, r = idx / C, c = idx % C;
+    s[r * (C + WPAD) + c] = (r0 + r < rows && c0 + c < cols) ? g[(size_t)(r0 + r) * cols + c0 + c] : __float2half(0.f);
+  }
+}
+
+template <bool TA, bool TB>
+__global__ void __launch_bounds__(128) gemm_wmma_k(int M, int N, int K, float alpha, const __half* A,
+                                                   const __half* B, float beta, float* C) {
+#if __CUDA_ARCH__ >= 700
+  using namespace nvcuda;
+  typedef typename std::conditional<TA, wmma::col_major, wmma::row_major>::type LA;
+  typedef typename std::conditional<TB, wmma::col_major, wmma::row_major>::type LB;
+  /* A^T is staged k-major (WK x WT), A as WT x WK; likewise B^T as WT x WK, B as WK x WT */
+  const int lda = TA ? WT + WPAD : WK + WPAD, ldb = TB ? WK + WPAD : WT + WPAD;
+  /* the A and B tiles during the K loop, then the FP32 output tile for the epilogue */
+  __shared__ __align__(32) unsigned char smem[WT * WLDC * sizeof(float)];
+  __half *As = (__half*)smem, *Bs = As + WT * (WK + WPAD);
+  int warp = threadIdx.x / 32, wi = (warp / 2) * 32, wj = (warp % 2) * 32;
+  int i0 = blockIdx.y * WT, j0 = blockIdx.x * WT;
+  wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc[2][2];
+#pragma unroll
+  for (int r = 0; r < 2; r++)
+#pragma unroll
+    for (int c = 0; c < 2; c++) wmma::fill_fragment(acc[r][c], 0.f);
+  for (int k0 = 0; k0 < K; k0 += WK) {
+    if (TA) wmma_stage<WK, WT>(As, A, K, M, k0, i0); else wmma_stage<WT, WK>(As, A, M, K, i0, k0);
+    if (TB) wmma_stage<WT, WK>(Bs, B, N, K, j0, k0); else wmma_stage<WK, WT>(Bs, B, K, N, k0, j0);
+    __syncthreads();
+#pragma unroll
+    for (int kk = 0; kk < WK; kk += 16) {
+      wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, LA> a[2];
+      wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, LB> b[2];
+#pragma unroll
+      for (int f = 0; f < 2; f++) {
+        int i = wi + f * 16, j = wj + f * 16;
+        wmma::load_matrix_sync(a[f], As + (TA ? kk * lda + i : i * lda + kk), lda);
+        wmma::load_matrix_sync(b[f], Bs + (TB ? j * ldb + kk : kk * ldb + j), ldb);
+      }
+#pragma unroll
+      for (int r = 0; r < 2; r++)
+#pragma unroll
+        for (int c = 0; c < 2; c++) wmma::mma_sync(acc[r][c], a[r], b[c], acc[r][c]);
+    }
+    __syncthreads();
+  }
+  /* fragments can't be stored to ragged global edges: go through shared memory. Reusing smem is safe because
+     the K loop's last __syncthreads ends every read of As and Bs. */
+  float* Cs = (float*)smem;
+#pragma unroll
+  for (int r = 0; r < 2; r++)
+#pragma unroll
+    for (int c = 0; c < 2; c++)
+      wmma::store_matrix_sync(Cs + (wi + r * 16) * WLDC + wj + c * 16, acc[r][c], WLDC, wmma::mem_row_major);
+  __syncthreads();
+#pragma unroll
+  for (int t = 0; t < WT * WT / 128; t++) {
+    int idx = threadIdx.x + t * 128, r = idx / WT, c = idx % WT, i = i0 + r, j = j0 + c;
+    if (i < M && j < N) {
+      size_t o = (size_t)i * N + j;
+      C[o] = alpha * Cs[r * WLDC + c] + (beta == 0.f ? 0.f : beta * C[o]);
+    }
+  }
+#endif
+}
+
 static cublasHandle_t handle(void) {
   static cublasHandle_t h = NULL;
   if (!h) cublasCreate(&h);
@@ -98,13 +183,14 @@ static cublasHandle_t handle(void) {
 }
 
 int gemm_parse(const char* s) {
-  const char* names[] = {"naive", "tiled", "regtile", "cublas"};
-  for (int i = 0; i < 4; i++) if (!strcmp(s, names[i])) return i;
+  const char* names[] = {"naive", "tiled", "regtile", "cublas", "wmma"};
+  for (int i = 0; i < 5; i++) if (!strcmp(s, names[i])) return i;
   return -1;
 }
 
 void gemm(gemm_impl impl, int transA, int transB, int M, int N, int K,
           float alpha, const float* A, const float* B, float beta, float* C) {
+  if (impl == GEMM_WMMA) { fprintf(stderr, "wmma needs --fp16\n"); exit(1); }
   if (impl == GEMM_CUBLAS) {
     /* cuBLAS is column-major: compute C^T = op(B)^T * op(A)^T, which is row-major C. */
     cublasSgemm(handle(), transB ? CUBLAS_OP_T : CUBLAS_OP_N, transA ? CUBLAS_OP_T : CUBLAS_OP_N,
@@ -120,5 +206,30 @@ void gemm(gemm_impl impl, int transA, int transB, int M, int N, int K,
   dim3 blk(TILE, TILE), grd((N + TILE - 1) / TILE, (M + TILE - 1) / TILE);
   if (impl == GEMM_NAIVE) gemm_naive_k<<<grd, blk>>>(transA, transB, M, N, K, alpha, A, B, beta, C);
   else                    gemm_tiled_k<<<grd, blk>>>(transA, transB, M, N, K, alpha, A, B, beta, C);
+  CUDA_CHECK(cudaGetLastError());
+}
+
+int gemm_h_supported(void) {
+  int dev, major;
+  CUDA_CHECK(cudaGetDevice(&dev));
+  CUDA_CHECK(cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev));
+  return major >= 7;
+}
+
+void gemm_h(gemmh_impl impl, int transA, int transB, int M, int N, int K,
+            float alpha, const __half* A, const __half* B, float beta, float* C) {
+  if (impl == GEMMH_CUBLAS) {
+    /* same row-major trick as the FP32 call: C^T = op(B)^T * op(A)^T */
+    cublasGemmEx(handle(), transB ? CUBLAS_OP_T : CUBLAS_OP_N, transA ? CUBLAS_OP_T : CUBLAS_OP_N,
+                 N, M, K, &alpha, B, CUDA_R_16F, transB ? K : N, A, CUDA_R_16F, transA ? M : K,
+                 &beta, C, CUDA_R_32F, N, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+    return;
+  }
+  if (!gemm_h_supported()) { fprintf(stderr, "gemm_h: wmma needs an sm_70+ GPU (tensor cores)\n"); exit(1); }
+  dim3 grd((N + WT - 1) / WT, (M + WT - 1) / WT);
+  if (transA && transB) gemm_wmma_k<true, true><<<grd, 128>>>(M, N, K, alpha, A, B, beta, C);
+  else if (transA)      gemm_wmma_k<true, false><<<grd, 128>>>(M, N, K, alpha, A, B, beta, C);
+  else if (transB)      gemm_wmma_k<false, true><<<grd, 128>>>(M, N, K, alpha, A, B, beta, C);
+  else                  gemm_wmma_k<false, false><<<grd, 128>>>(M, N, K, alpha, A, B, beta, C);
   CUDA_CHECK(cudaGetLastError());
 }
