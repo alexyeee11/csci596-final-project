@@ -13,6 +13,7 @@ typedef struct {
   float *W, *b;    /* views into MLP.params; W is in x out */
   float *dW, *db;  /* views into MLP.grads, same layout */
   float* Y;        /* post-activation output, max_batch x out */
+  void *W16, *Y16; /* __half copies of W (view into MLP.params16) and Y; NULL unless mlp_enable_fp16 */
 } Layer;
 
 typedef struct {
@@ -25,6 +26,10 @@ typedef struct {
   float* dbuf[2];         /* backward ping-pong scratch, max_batch x max_width */
   float* loss_buf;        /* max_batch */
   gemm_impl impl;
+  /* mlp_enable_fp16: __half copies of params, of the input batch (max_batch x input) and of the backward dZ
+     (max_batch x max_width); NULL otherwise. grads are scaled by loss_scale (1 without FP16). */
+  void *params16, *X16, *dz16;
+  float loss_scale;
 } MLP;
 
 /* sizes = {input, hidden..., classes}. ReLU after every layer except the last. */
@@ -33,6 +38,9 @@ MLP* mlp_create(const int* sizes, int nsizes, int max_batch, unsigned seed, gemm
 MLP* mlp_create_range(const int* sizes, int nsizes, int first, int last, int max_batch, unsigned seed,
                       gemm_impl impl);
 void mlp_free(MLP* m);
+/* Switch to FP16-input GEMMs (gemm_h: cuBLAS if impl == GEMM_CUBLAS, else WMMA) with FP32 master weights and
+   grads and a static loss scale. Exits with a message on a pre-sm_70 GPU. Not supported by the stage API. */
+void mlp_enable_fp16(MLP* m);
 const float* mlp_forward(MLP* m, const float* X, int B);  /* device logits, B x classes */
 float mlp_forward_backward(MLP* m, const float* X, const int* y, int B, grad_hook hook, void* ctx);
 /* Pipeline stage, micro-batch k of b rows (max_batch = all micro-batches). Forward writes rows [k*b, (k+1)*b) of
@@ -42,7 +50,7 @@ float mlp_forward_backward(MLP* m, const float* X, const int* y, int B, grad_hoo
 float* mlp_stage_forward(MLP* m, const float* X, int b, int k);
 void mlp_stage_backward(MLP* m, const float* X, const float* dOut, float* dX, int b, int k);
 void mlp_zero_grads(MLP* m);
-void mlp_sgd(MLP* m, float lr, float grad_scale);         /* params -= lr * grad_scale * grads */
+void mlp_sgd(MLP* m, float lr, float grad_scale);         /* params -= lr * grad_scale / loss_scale * grads */
 
 #ifdef __cplusplus
 }

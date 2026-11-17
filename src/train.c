@@ -12,7 +12,7 @@
 
 typedef struct {
   const char* data;
-  int synthetic, epochs, steps, batch, hidden, layers, gemm, allreduce, nccl, overlap;
+  int synthetic, epochs, steps, batch, hidden, layers, gemm, allreduce, nccl, overlap, fp16;
   float lr, bucket_mb;
   unsigned seed;
 } Opts;
@@ -20,17 +20,18 @@ typedef struct {
 static void usage(void) {
   fprintf(stderr,
           "usage: train (--data DIR | --synthetic) [--epochs N] [--steps N] [--batch N] [--hidden N]\n"
-          "             [--layers N] [--lr X] [--seed N] [--gemm naive|tiled|regtile|cublas]\n"
+          "             [--layers N] [--lr X] [--seed N] [--gemm naive|tiled|regtile|cublas|wmma] [--fp16]\n"
           "             [--allreduce naive|tree|ring|mpi|nccl] [--overlap [--bucket-mb X]]\n");
   exit(2);
 }
 
 static Opts parse(int argc, char** argv) {
-  Opts o = {NULL, 0, 1, 0, 256, 4096, 3, GEMM_TILED, AR_RING, 0, 0, 0.01f, 25.f, 42};
+  Opts o = {NULL, 0, 1, 0, 256, 4096, 3, -1, AR_RING, 0, 0, 0, 0.01f, 25.f, 42};
   for (int i = 1; i < argc; i++) {
     const char* a = argv[i];
     if (!strcmp(a, "--synthetic")) { o.synthetic = 1; continue; }
     if (!strcmp(a, "--overlap")) { o.overlap = 1; continue; }
+    if (!strcmp(a, "--fp16")) { o.fp16 = 1; continue; }
     if (i + 1 >= argc) usage();
     const char* v = argv[++i];
     if (!strcmp(a, "--data")) o.data = v;
@@ -48,6 +49,12 @@ static Opts parse(int argc, char** argv) {
     else usage();
   }
   if ((!o.data && !o.synthetic) || o.layers < 1 || o.layers > 14 || o.batch < 1) usage();
+  if (o.gemm < 0) o.gemm = o.fp16 ? GEMM_WMMA : GEMM_TILED;
+  if (o.gemm == GEMM_WMMA && !o.fp16) { fprintf(stderr, "--gemm wmma needs --fp16\n"); exit(2); }
+  if (o.fp16 && o.gemm != GEMM_WMMA && o.gemm != GEMM_CUBLAS) {
+    fprintf(stderr, "--fp16 supports --gemm wmma|cublas only\n");
+    exit(2);
+  }
   return o;
 }
 
@@ -131,6 +138,7 @@ int main(int argc, char** argv) {
   for (int l = 0; l < o.layers; l++) sizes[ns++] = o.hidden;
   sizes[ns++] = 10;
   MLP* m = mlp_create(sizes, ns, b, o.seed, (gemm_impl)o.gemm);
+  if (o.fp16) mlp_enable_fp16(m);  /* exits on a pre-sm_70 GPU */
 
   float* hX = malloc((size_t)b * train.dim * sizeof(float));
   float* hlogits = malloc((size_t)b * 10 * sizeof(float));
