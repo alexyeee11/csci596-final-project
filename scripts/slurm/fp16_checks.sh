@@ -26,18 +26,20 @@ status=0
 ./bin/test_mlp || status=1
 train1() { srun --mpi="$SRUN_MPI" --ntasks=1 ./bin/train "$@"; }
 echo "== rejected combinations (want 3 refusals) =="
-train1 --synthetic --steps 1 --gemm wmma 2>&1 | tail -1
-train1 --synthetic --steps 1 --fp16 --gemm tiled 2>&1 | tail -1
-train1 --synthetic --steps 1 --fp16 --gemm regtile 2>&1 | tail -1
+# srun appends its own "Exited with exit code 2" line, so grep for train's message
+for args in "--gemm wmma" "--fp16 --gemm tiled" "--fp16 --gemm regtile"; do
+  train1 --synthetic --steps 1 $args 2>&1 | grep -E 'needs --fp16|supports --gemm' ||
+    { echo "refusal $args: FAIL (no message)"; status=1; }
+done
 echo "== acceptance 1: synthetic --fp16 (want test_acc >= 0.90) =="
 train1 --synthetic --steps 50 --batch 64 --hidden 256 --layers 2 --lr 0.05 --fp16 | grep test_acc |
-  awk '{ print } $3 >= 0.90 { ok = 1 } END { print ok ? "synthetic fp16: PASS" : "synthetic fp16: FAIL"; exit !ok }' ||
+  awk '{ print } $4 != "" && $4 + 0 >= 0.90 { ok = 1 } END { print ok ? "synthetic fp16: PASS" : "synthetic fp16: FAIL"; exit !ok }' ||
   status=1
 echo "== acceptance 2: CIFAR-10 5 epochs, FP32 vs FP16 (want |diff| <= 0.02) =="
 CIFAR=${CIFAR:-$HOME/data/cifar-10-batches-bin}
 CARGS="--data $CIFAR --epochs 5 --batch 256 --hidden 1024 --layers 2 --lr 0.02"
-echo "-- fp32"; f32=$(train1 $CARGS | grep test_acc | tee /dev/stderr | tail -1 | awk '{ print $3 }')
-echo "-- fp16"; f16=$(train1 $CARGS --fp16 | grep test_acc | tee /dev/stderr | tail -1 | awk '{ print $3 }')
+echo "-- fp32"; f32=$(train1 $CARGS | grep test_acc | tee /dev/stderr | tail -1 | awk '{ print $4 }')
+echo "-- fp16"; f16=$(train1 $CARGS --fp16 | grep test_acc | tee /dev/stderr | tail -1 | awk '{ print $4 }')
 awk -v a="$f32" -v b="$f16" 'BEGIN {
   d = a - b; if (d < 0) d = -d
   ok = a != "" && b != "" && d <= 0.02
