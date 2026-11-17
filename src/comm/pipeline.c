@@ -43,6 +43,17 @@ void pp_free(void) {
   }
 }
 
+/* Wait for this stage's kernels while driving MPI. Without progress calls, an MPI_Isend larger than the eager limit
+   does not move until the sender next enters MPI, so micro-batch k would reach the next stage only after this stage
+   finished k+1 or later and the stages would effectively take turns (seen on the laptop: stage 1 started its first
+   forward after stage 0 had done all M). MPI_Testall only makes progress here; the requests are completed later. */
+static void sync_progress(MPI_Request* rq, int n) {
+  cudaError_t e;
+  int flag;
+  while ((e = cudaStreamQuery(0)) == cudaErrorNotReady) MPI_Testall(n, rq, &flag, MPI_STATUSES_IGNORE);
+  CUDA_CHECK(e);
+}
+
 float pp_step(MLP* m, const float* X, const int* y, int b_total, int M, MPI_Comm pipe, double* busy_s) {
   int s, P;
   MPI_Comm_rank(pipe, &s);
@@ -82,7 +93,7 @@ float pp_step(MLP* m, const float* X, const int* y, int b_total, int M, MPI_Comm
     t = now();
     float* yk = mlp_stage_forward(m, xk, b, k);
     if (head) loss += softmax_xent(yk, y + k * b, ddlog + k * nout, m->loss_buf, b, out);
-    CUDA_CHECK(cudaStreamSynchronize(0));
+    sync_progress(rq, 4 * M);
     busy += now() - t;
     if (!head) {
       CUDA_CHECK(cudaMemcpy(hfout + k * nout, yk, nout * sizeof(float), cudaMemcpyDeviceToHost));
@@ -103,7 +114,7 @@ float pp_step(MLP* m, const float* X, const int* y, int b_total, int M, MPI_Comm
     }
     t = now();
     mlp_stage_backward(m, first ? X + k * nin : din + k * nin, dk, ddx, b, k);
-    CUDA_CHECK(cudaStreamSynchronize(0));
+    sync_progress(rq, 4 * M);
     busy += now() - t;
     if (!first) {
       CUDA_CHECK(cudaMemcpy(hbout + k * nin, ddx, nin * sizeof(float), cudaMemcpyDeviceToHost));
