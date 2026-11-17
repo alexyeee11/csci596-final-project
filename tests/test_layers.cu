@@ -50,13 +50,12 @@ int main(void) {
     cudaFree(dG); cudaFree(dY);
   }
 
-  {
-    float *dG = up(x, R * C), *dB;
-    CUDA_CHECK(cudaMalloc(&dB, C * sizeof(float)));
-    bias_grad(dB, dG, R, C);
+  for (int acc = 0; acc < 2; acc++) {
+    float *dG = up(x, R * C), *dB = up(b, C);  /* db starts nonzero: overwrite must ignore it */
+    bias_grad(dB, dG, R, C, acc);
     down(got, dB, C);
-    for (int j = 0; j < C; j++) { want[j] = 0; for (int r = 0; r < R; r++) want[j] += x[r * C + j]; }
-    check("bias_grad", got, want, C, 1e-5f);
+    for (int j = 0; j < C; j++) { want[j] = acc ? b[j] : 0; for (int r = 0; r < R; r++) want[j] += x[r * C + j]; }
+    check(acc ? "bias_grad_accumulate" : "bias_grad", got, want, C, 1e-5f);
     cudaFree(dG); cudaFree(dB);
   }
 
