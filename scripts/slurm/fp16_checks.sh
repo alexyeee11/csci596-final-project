@@ -38,8 +38,9 @@ train1 --synthetic --steps 50 --batch 64 --hidden 256 --layers 2 --lr 0.05 --fp1
 echo "== acceptance 2: CIFAR-10 5 epochs, FP32 vs FP16 (want |diff| <= 0.02) =="
 CIFAR=${CIFAR:-$HOME/data/cifar-10-batches-bin}
 CARGS="--data $CIFAR --epochs 5 --batch 256 --hidden 1024 --layers 2 --lr 0.02"
-echo "-- fp32"; f32=$(train1 $CARGS | grep test_acc | tee /dev/stderr | tail -1 | awk '{ print $4 }')
-echo "-- fp16"; f16=$(train1 $CARGS --fp16 | grep test_acc | tee /dev/stderr | tail -1 | awk '{ print $4 }')
+# no tee /dev/stderr: in a Slurm job that reopens the log file with O_TRUNC and wipes it
+echo "-- fp32"; out=$(train1 $CARGS | grep test_acc); echo "$out"; f32=$(echo "$out" | tail -1 | awk '{ print $4 }')
+echo "-- fp16"; out=$(train1 $CARGS --fp16 | grep test_acc); echo "$out"; f16=$(echo "$out" | tail -1 | awk '{ print $4 }')
 awk -v a="$f32" -v b="$f16" 'BEGIN {
   d = a - b; if (d < 0) d = -d
   ok = a != "" && b != "" && d <= 0.02
