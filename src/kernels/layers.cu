@@ -16,10 +16,10 @@ __global__ void relu_bwd_k(float* dY, const float* Y, size_t n) {
   if (i < n && Y[i] <= 0.f) dY[i] = 0.f;
 }
 
-__global__ void bias_grad_k(float* db, const float* dY, int rows, int cols) {
+__global__ void bias_grad_k(float* db, const float* dY, int rows, int cols, int acc) {
   int j = blockIdx.x * blockDim.x + threadIdx.x;
   if (j >= cols) return;
-  float s = 0.f;
+  float s = acc ? db[j] : 0.f;
   for (int r = 0; r < rows; r++) s += dY[(size_t)r * cols + j];
   db[j] = s;
 }
@@ -53,8 +53,8 @@ void relu_backward(float* dY, const float* Y, size_t n) {
   CUDA_CHECK(cudaGetLastError());
 }
 
-void bias_grad(float* db, const float* dY, int rows, int cols) {
-  bias_grad_k<<<blocks(cols), 256>>>(db, dY, rows, cols);
+void bias_grad(float* db, const float* dY, int rows, int cols, int accumulate) {
+  bias_grad_k<<<blocks(cols), 256>>>(db, dY, rows, cols, accumulate);
   CUDA_CHECK(cudaGetLastError());
 }
 

@@ -1,7 +1,9 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include "cuda_check.h"
+#include "kernels/layers.h"
 #include "model/mlp.h"
 
 static unsigned seed = 7;
@@ -67,6 +69,74 @@ int main(void) {
 
   mlp_free(m);
   free(ana); free(par); free(g2);
+
+  /* Stages of an 8->16->12->4 network: stage 0 = layer [0,1), stage 1 = layers [1,3). */
+  const int s4[] = {8, 16, 12, 4};
+  enum { BB = 8, MB = 2, b = BB / MB };
+  float X8[BB * 8];
+  for (int i = 0; i < BB * 8; i++) X8[i] = rnd();
+  int y8[BB] = {0, 3, 1, 2, 2, 0, 3, 1};
+  float *dX8, *dH, *dlog; int* dy8;
+  CUDA_CHECK(cudaMalloc(&dX8, sizeof X8));
+  CUDA_CHECK(cudaMalloc(&dy8, sizeof y8));
+  CUDA_CHECK(cudaMalloc(&dH, BB * 16 * sizeof(float)));    /* grad of stage 0 output, all micro-batches */
+  CUDA_CHECK(cudaMalloc(&dlog, BB * 4 * sizeof(float)));
+  float* lbuf;
+  CUDA_CHECK(cudaMalloc(&lbuf, b * sizeof(float)));
+  CUDA_CHECK(cudaMemcpy(dX8, X8, sizeof X8, cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(dy8, y8, sizeof y8, cudaMemcpyHostToDevice));
+
+  /* 4. a range holds exactly the matching slice of the full model's initial weights */
+  {
+    MLP* full = mlp_create(s4, 4, BB, 123, GEMM_TILED);
+    MLP* part = mlp_create_range(s4, 4, 1, 3, BB, 123, GEMM_TILED);
+    size_t off = 8 * 16 + 16, np = part->nparams;  /* layer 1 starts after [W0|b0] */
+    float *hf = (float*)malloc(full->nparams * 4), *hp = (float*)malloc(np * 4);
+    CUDA_CHECK(cudaMemcpy(hf, full->params, full->nparams * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(hp, part->params, np * 4, cudaMemcpyDeviceToHost));
+    if (np != full->nparams - off || memcmp(hp, hf + off, np * 4) || part->first != 1 || !part->head ||
+        part->nlayers != 2 || full->first != 0 || !full->head) {
+      printf("FAIL range init: nparams %zu (want %zu), first %d, head %d\n", np, full->nparams - off,
+             part->first, part->head);
+      fails++;
+    }
+    mlp_free(full); mlp_free(part);
+    free(hf); free(hp);
+  }
+
+  /* 5. two stages driven by hand with 2 micro-batches give the full model's gradients and loss */
+  for (int impl = GEMM_NAIVE; impl <= GEMM_CUBLAS; impl++) {
+    MLP* full = mlp_create(s4, 4, BB, 123, (gemm_impl)impl);
+    MLP* st[2] = {mlp_create_range(s4, 4, 0, 1, BB, 123, (gemm_impl)impl),
+                  mlp_create_range(s4, 4, 1, 3, BB, 123, (gemm_impl)impl)};
+    float lfull = mlp_forward_backward(full, dX8, dy8, BB, NULL, NULL), lsum = 0;
+    const float* h[MB];
+    for (int k = 0; k < MB; k++) {  /* GPipe: all forwards, then all backwards */
+      h[k] = mlp_stage_forward(st[0], dX8 + k * b * 8, b, k);
+      const float* logits = mlp_stage_forward(st[1], h[k], b, k);
+      lsum += softmax_xent(logits, dy8 + k * b, dlog + k * b * 4, lbuf, b, 4);
+    }
+    for (int k = 0; k < MB; k++) {  /* k = 0 first: it overwrites grads, later k accumulate */
+      mlp_stage_backward(st[1], h[k], dlog + k * b * 4, dH + k * b * 16, b, k);
+      mlp_stage_backward(st[0], dX8 + k * b * 8, dH + k * b * 16, NULL, b, k);
+    }
+    size_t n0 = st[0]->nparams, nf = full->nparams;
+    float *gf = (float*)malloc(nf * 4), *gs = (float*)malloc(nf * 4);
+    CUDA_CHECK(cudaMemcpy(gf, full->grads, nf * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(gs, st[0]->grads, n0 * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(gs + n0, st[1]->grads, st[1]->nparams * 4, cudaMemcpyDeviceToHost));
+    float gmax = 0, err = 0;
+    for (size_t i = 0; i < nf; i++) gmax = fmaxf(gmax, fabsf(gf[i]));
+    for (size_t i = 0; i < nf; i++) err = fmaxf(err, fabsf(gs[i] / MB - gf[i]));
+    if (n0 + st[1]->nparams != nf || !(err <= 1e-4f * gmax) || !(fabsf(lsum / MB - lfull) <= 1e-5f * lfull)) {
+      printf("FAIL split impl %d: grad err %g (max |g| %g), loss %g vs %g\n", impl, err, gmax, lsum / MB, lfull);
+      fails++;
+    }
+    mlp_free(full); mlp_free(st[0]); mlp_free(st[1]);
+    free(gf); free(gs);
+  }
+  cudaFree(dX8); cudaFree(dy8); cudaFree(dH); cudaFree(dlog); cudaFree(lbuf);
+
   printf(fails ? "test_mlp: FAIL (%d)\n" : "test_mlp: PASS\n", fails);
   return fails != 0;
 }
