@@ -37,10 +37,11 @@ const float* mlp_forward(MLP* m, const float* X, int B);  /* device logits, B x 
 float mlp_forward_backward(MLP* m, const float* X, const int* y, int B, grad_hook hook, void* ctx);
 /* Pipeline stage, micro-batch k of b rows (max_batch = all micro-batches). Forward writes rows [k*b, (k+1)*b) of
    every layer's Y and returns the stage output rows. Backward: X = this micro-batch's stage input, dOut = grad of
-   the stage output (dlogits on the head), dX = grad of X (NULL to skip). Grads are overwritten for k == 0 and
-   accumulated for k > 0, so after M micro-batches scale by 1/M in mlp_sgd. */
+   the stage output (dlogits on the head), dX = grad of X (NULL to skip). Grads accumulate for every k, in any
+   order: call mlp_zero_grads once per step before the backwards, and scale by 1/M in mlp_sgd. */
 float* mlp_stage_forward(MLP* m, const float* X, int b, int k);
 void mlp_stage_backward(MLP* m, const float* X, const float* dOut, float* dX, int b, int k);
+void mlp_zero_grads(MLP* m);
 void mlp_sgd(MLP* m, float lr, float grad_scale);         /* params -= lr * grad_scale * grads */
 
 #ifdef __cplusplus

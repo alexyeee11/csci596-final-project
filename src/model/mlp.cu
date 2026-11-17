@@ -79,12 +79,13 @@ float* mlp_stage_forward(MLP* m, const float* X, int b, int k) {
 const float* mlp_forward(MLP* m, const float* X, int B) { return mlp_stage_forward(m, X, B, 0); }
 
 /* dZ of the stage's last layer lives in dOut (head) or dbuf[1] (dOut times the ReLU mask), so the first dA goes to
-   dbuf[0] and the two then alternate. hook (may be NULL) sees each layer's grads once they are final. */
-static void stage_backward(MLP* m, const float* X, const float* dOut, float* dX, int b, int k,
+   dbuf[0] and the two then alternate. acc: add to grads instead of overwriting them. hook (may be NULL) sees each
+   layer's grads once they are final. */
+static void stage_backward(MLP* m, const float* X, const float* dOut, float* dX, int b, int k, int acc,
                            grad_hook hook, void* ctx) {
   int last = m->nlayers - 1, nxt = 0;
   size_t r0 = (size_t)k * b;
-  float beta = k ? 1.f : 0.f;
+  float beta = acc ? 1.f : 0.f;
   const float* dZ = dOut;
   if (!m->head) {
     /* ponytail: one device copy so dOut stays const; fold the mask into the caller if it shows up in profiles */
@@ -97,7 +98,7 @@ static void stage_backward(MLP* m, const float* X, const float* dOut, float* dX,
     Layer* L = &m->L[l];
     const float* Ain = l > 0 ? m->L[l - 1].Y + r0 * L->in : X;
     gemm(m->impl, 1, 0, L->in, L->out, b, 1.f, Ain, dZ, beta, L->dW);  /* dW (+)= Ain^T dZ */
-    bias_grad(L->db, dZ, b, L->out, k > 0);
+    bias_grad(L->db, dZ, b, L->out, acc);
     if (hook) hook(l, L->dW, (size_t)L->in * L->out + L->out, ctx);
     if (l > 0) {
       float* dA = m->dbuf[nxt];
@@ -112,15 +113,17 @@ static void stage_backward(MLP* m, const float* X, const float* dOut, float* dX,
 }
 
 void mlp_stage_backward(MLP* m, const float* X, const float* dOut, float* dX, int b, int k) {
-  stage_backward(m, X, dOut, dX, b, k, NULL, NULL);
+  stage_backward(m, X, dOut, dX, b, k, 1, NULL, NULL);
 }
 
 float mlp_forward_backward(MLP* m, const float* X, const int* y, int B, grad_hook hook, void* ctx) {
   const float* logits = mlp_forward(m, X, B);
   float loss = softmax_xent(logits, y, m->dbuf[1], m->loss_buf, B, m->L[m->nlayers - 1].out);
-  stage_backward(m, X, m->dbuf[1], NULL, B, 0, hook, ctx);
+  stage_backward(m, X, m->dbuf[1], NULL, B, 0, 0, hook, ctx);
   return loss;
 }
+
+void mlp_zero_grads(MLP* m) { CUDA_CHECK(cudaMemset(m->grads, 0, m->nparams * sizeof(float))); }
 
 void mlp_sgd(MLP* m, float lr, float grad_scale) {
   sgd_step(m->params, m->grads, lr * grad_scale, m->nparams);

@@ -116,7 +116,11 @@ int main(void) {
       const float* logits = mlp_stage_forward(st[1], h[k], b, k);
       lsum += softmax_xent(logits, dy8 + k * b, dlog + k * b * 4, lbuf, b, 4);
     }
-    for (int k = 0; k < MB; k++) {  /* k = 0 first: it overwrites grads, later k accumulate */
+    /* stage grads start dirty (from a throwaway backward) so mlp_zero_grads is exercised */
+    mlp_stage_backward(st[1], h[0], dlog, dH, b, 0);
+    mlp_stage_backward(st[0], dX8, dH, NULL, b, 0);
+    mlp_zero_grads(st[0]); mlp_zero_grads(st[1]);
+    for (int k = MB - 1; k >= 0; k--) {  /* GPipe backward order; grads accumulate for every k */
       mlp_stage_backward(st[1], h[k], dlog + k * b * 4, dH + k * b * 16, b, k);
       mlp_stage_backward(st[0], dX8 + k * b * 8, dH + k * b * 16, NULL, b, k);
     }

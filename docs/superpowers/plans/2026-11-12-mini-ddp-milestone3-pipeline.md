@@ -55,7 +55,7 @@ results/pipeline/, results/2d/    committed measurements
 ### Task 1: GPipe pipeline (Shaozhe; Alex reviews)
 
 **Interfaces:**
-- Consumes (Alex, Milestone 3a Task 1): `mlp_create_range(sizes, nsizes, first, last, max_batch, seed, impl)`, `mlp_stage_forward(m, X, b, k)` → stage output rows, `mlp_stage_backward(m, X, dOut, dX, b, k)` (overwrites grads at `k == 0`, accumulates after), fields `m->first` and `m->head`; `softmax_xent` from `kernels/layers.h`. Summing M micro-batches gives M × the batch-mean gradient, so SGD is called with `grad_scale = 1/M` (times `1/dp` in Task 3).
+- Consumes (Alex, Milestone 3a Task 1): `mlp_create_range(sizes, nsizes, first, last, max_batch, seed, impl)`, `mlp_stage_forward(m, X, b, k)` → stage output rows, `mlp_stage_backward(m, X, dOut, dX, b, k)` (accumulates into grads for every `k`; call `mlp_zero_grads(m)` once per step before the backwards), `mlp_zero_grads(m)`, fields `m->first` and `m->head`; `softmax_xent` from `kernels/layers.h`. Summing M micro-batches gives M × the batch-mean gradient, so SGD is called with `grad_scale = 1/M` (times `1/dp` in Task 3).
 - `void pp_split(int nlayers, int P, int stage, int* first, int* last);` contiguous layer ranges, as equal in layer count as possible, earlier stages taking the extra layer.
 - `float pp_step(MLP* stage, const float* X, const int* y, int b_total, int M, MPI_Comm pipe, double* busy_s);` one GPipe step on this replica's `b_total` rows (`X` used by the first stage, `y` by the last). Returns the mean loss on every rank of `pipe`; `*busy_s` is this rank's kernel time.
 - `int pp_correct(MLP* stage, const float* X, const int* y, int b, MPI_Comm pipe);` forward-only pass for evaluation; returns the number of correct predictions on every rank.
