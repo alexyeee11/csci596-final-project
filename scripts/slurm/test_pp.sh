@@ -10,7 +10,7 @@
 #SBATCH --output=logs/%x-%j.out
 # usage: mkdir -p logs && sbatch --account=<class account> scripts/slurm/test_pp.sh                       (P = 2)
 #        sbatch --account=<class account> --partition=gpu --nodes=2 --ntasks-per-node=2 --ntasks=4 \
-#          scripts/slurm/test_pp.sh                                                                       (P = 4, 2 nodes)
+#          scripts/slurm/test_pp.sh                                                       (P = 4, and 2D dp = 2 x P = 2; 2 nodes)
 # Milestone 3b Tasks 1 and 3 acceptance: on NP = $SLURM_NTASKS ranks, GPipe with P = NP stages and, for NP >= 4,
 # 2D with P = NP/2 (dp = 2), each for M = 1, 2, 4 against 1 rank; then data parallelism on the same ranks.
 # PPS="..." overrides the pipeline depths.
