@@ -54,11 +54,6 @@ static Opts parse(int argc, char** argv) {
   }
   if ((!o.data && !o.synthetic) || o.layers < 1 || o.layers > 14 || o.batch < 1) usage();
   if (o.gemm < 0) o.gemm = o.fp16 ? GEMM_WMMA : GEMM_TILED;
-  if (o.gemm == GEMM_WMMA && !o.fp16) { fprintf(stderr, "--gemm wmma needs --fp16\n"); exit(2); }
-  if (o.fp16 && o.gemm != GEMM_WMMA && o.gemm != GEMM_CUBLAS) {
-    fprintf(stderr, "--fp16 supports --gemm wmma|cublas only\n");
-    exit(2);
-  }
   return o;
 }
 
@@ -116,7 +111,10 @@ static float evaluate_pp(MLP* m, const Dataset* d, int b, float* dX, MPI_Comm pi
 static void check_opts(const Opts* o, int rank, int p) {
   const char* err = NULL;
   char msg[160];
-  if (o->nccl && o->overlap) err = "--overlap stages buckets through host memory; it does not combine with --allreduce nccl";
+  if (o->gemm == GEMM_WMMA && !o->fp16) err = "--gemm wmma needs --fp16";
+  else if (o->fp16 && o->gemm != GEMM_WMMA && o->gemm != GEMM_CUBLAS) err = "--fp16 supports --gemm wmma|cublas only";
+  else if (o->fp16 && o->pp > 1) err = "--fp16 does not combine with --pp";
+  else if (o->nccl && o->overlap) err = "--overlap stages buckets through host memory; it does not combine with --allreduce nccl";
   else if (o->pp > 1 && (o->overlap || o->nccl)) err = "--pp does not combine with --overlap or --allreduce nccl";
   else if (o->mb > 1 && o->pp == 1) err = "--microbatches needs --pp > 1";
   else if (o->pp > o->layers + 1) {

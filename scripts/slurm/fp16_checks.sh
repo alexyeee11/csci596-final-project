@@ -25,11 +25,11 @@ status=0
 ./bin/test_layers || status=1
 ./bin/test_mlp || status=1
 train1() { srun --mpi="$SRUN_MPI" --ntasks=1 ./bin/train "$@"; }
-echo "== rejected combinations (want 3 refusals) =="
+echo "== rejected combinations (want 4 refusals) =="
 # srun appends its own "Exited with exit code 2" line, so grep for train's message; || true because train exits 2
 # and pipefail would otherwise fail the pipe even when grep matches
-for args in "--gemm wmma" "--fp16 --gemm tiled" "--fp16 --gemm regtile"; do
-  { train1 --synthetic --steps 1 $args 2>&1 || true; } | grep -E 'needs --fp16|supports --gemm' ||
+for args in "--gemm wmma" "--fp16 --gemm tiled" "--fp16 --gemm regtile" "--fp16 --pp 2"; do
+  { train1 --synthetic --steps 1 $args 2>&1 || true; } | grep -E 'needs --fp16|supports --gemm|--fp16 does not combine' ||
     { echo "refusal $args: FAIL (no message)"; status=1; }
 done
 echo "== acceptance 1: synthetic --fp16 (want test_acc >= 0.90) =="
