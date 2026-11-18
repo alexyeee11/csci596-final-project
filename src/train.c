@@ -93,13 +93,13 @@ static float evaluate(MLP* m, const Dataset* d, int b, float* dX, float* hlogits
   return total ? (float)correct / total : 0.f;
 }
 
-/* Pipeline version: every rank walks the test set; the first stage feeds inputs, the head counts. */
-static float evaluate_pp(MLP* m, const Dataset* d, int b, float* dX) {
+/* Pipeline version: every rank of `pipe` walks the test set; the first stage feeds inputs, the head counts. */
+static float evaluate_pp(MLP* m, const Dataset* d, int b, float* dX, MPI_Comm pipe) {
   int correct = 0, total = 0;
   for (int s = 0; s + b <= d->n; s += b) {
     if (m->first == 0)
       CUDA_CHECK(cudaMemcpy(dX, d->X + (size_t)s * d->dim, (size_t)b * d->dim * sizeof(float), cudaMemcpyHostToDevice));
-    correct += pp_correct(m, dX, d->y + s, b, MPI_COMM_WORLD);
+    correct += pp_correct(m, dX, d->y + s, b, pipe);
     total += b;
   }
   return total ? (float)correct / total : 0.f;
@@ -115,8 +115,8 @@ static void check_opts(const Opts* o, int rank, int p) {
   else if (o->pp > o->layers + 1) {
     snprintf(msg, sizeof msg, "--pp %d is more than the %d layers of the model", o->pp, o->layers + 1);
     err = msg;
-  } else if (o->pp > 1 && p != o->pp) {
-    snprintf(msg, sizeof msg, "--pp %d needs exactly %d ranks (got %d)", o->pp, o->pp, p);
+  } else if (p % o->pp) {
+    snprintf(msg, sizeof msg, "%d ranks are not a multiple of --pp %d", p, o->pp);
     err = msg;
   } else if (o->batch % (p / o->pp)) {
     snprintf(msg, sizeof msg, "--batch %d is not divisible by %d ranks", o->batch, p / o->pp);
@@ -149,9 +149,14 @@ int main(int argc, char** argv) {
   }
   check_opts(&o, rank, p);
   if (o.nccl) nccl_init(MPI_COMM_WORLD);  /* exits with a message when built without NCCL */
-  /* With --pp the world is one pipeline (rank = stage) and each rank sees the whole batch; otherwise dp = p. */
+  /* dp x pp grid: stage = rank / dp, replica = rank % dp, so with 2 GPUs per node the data-parallel peers of a stage
+     share a node and the gradient all-reduce stays intra-node where it can. pipe: one replica's stages in order;
+     data: one stage's replicas. Without --pp, dp = p and data = the world. */
   const int pp = o.pp, dp = p / pp, replica = rank % dp, stage = rank / dp;
   int b = o.batch / dp;
+  MPI_Comm pipe, data;
+  MPI_Comm_split(MPI_COMM_WORLD, replica, stage, &pipe);
+  MPI_Comm_split(MPI_COMM_WORLD, stage, replica, &data);
 
   Dataset train, test;
   if (o.synthetic) {
@@ -180,7 +185,7 @@ int main(int argc, char** argv) {
   float* hgrad = NULL;  /* pinned staging buffer for the host all-reduce */
   Overlap* ov = NULL;     /* with --overlap, buckets are all-reduced on a comm thread during backward */
   if (pp > 1) {
-    /* the pipeline all-reduces nothing */
+    if (dp > 1) CUDA_CHECK(cudaMallocHost((void**)&hgrad, m->nparams * sizeof(float)));  /* this stage's grads */
   } else if (p > 1 && o.overlap) {
     size_t bucket = (size_t)(o.bucket_mb * (1 << 20) / sizeof(float));
     ov = overlap_create(m->grads, m->nparams, bucket ? bucket : 1, (ar_algo)o.allreduce, MPI_COMM_WORLD, lrank % ndev);
@@ -202,14 +207,21 @@ int main(int argc, char** argv) {
       CUDA_CHECK(cudaMemcpy(dy, hy, b * sizeof(int), cudaMemcpyHostToDevice));
 
       if (pp > 1) {
-        /* compute_s: mean over stages of each stage's kernel time (incl. SGD); comm_s: the rest of the slowest
-           stage's step, i.e. transfers plus bubble */
+        /* compute_s: mean over ranks of each rank's kernel time (incl. SGD); comm_s: the rest of the slowest rank's
+           step, i.e. activation transfers, bubble and (dp > 1) the stage's gradient all-reduce */
         double busy, t0 = now();
-        float loss = pp_step(m, dX, dy, b, o.mb, MPI_COMM_WORLD, &busy);
+        float loss = pp_step(m, dX, dy, b, o.mb, pipe, &busy), gl;
+        if (dp > 1) {
+          CUDA_CHECK(cudaMemcpy(hgrad, m->grads, m->nparams * sizeof(float), cudaMemcpyDeviceToHost));
+          allreduce_sum(hgrad, m->nparams, (ar_algo)o.allreduce, data);
+          CUDA_CHECK(cudaMemcpy(m->grads, hgrad, m->nparams * sizeof(float), cudaMemcpyHostToDevice));
+        }
         double t1 = now();
-        mlp_sgd(m, o.lr, 1.0f / o.mb);  /* sum of M micro-batch means / M = batch mean */
+        mlp_sgd(m, o.lr, 1.0f / (o.mb * dp));  /* sum over M micro-batches and dp replicas / (M dp) = batch mean */
         CUDA_CHECK(cudaStreamSynchronize(0));
         double t2 = now(), st[2] = {busy + (t2 - t1), t2 - t0}, sum, mx;
+        MPI_Allreduce(&loss, &gl, 1, MPI_FLOAT, MPI_SUM, data);  /* every stage has its replica's loss */
+        loss = gl / dp;
         MPI_Reduce(&st[0], &sum, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
         MPI_Reduce(&st[1], &mx, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
         if (!rank) printf("step %d loss %.6f compute_s %.6f comm_s %.6f step_s %.6f\n", step, loss, sum / p, mx - sum / p, mx);
@@ -245,8 +257,10 @@ int main(int argc, char** argv) {
       if (o.steps && step >= o.steps) done = 1;
     }
     if (pp > 1) {
-      float acc = evaluate_pp(m, &test, b, dX);
-      if (!rank) printf("epoch %d test_acc %.4f\n", e, acc);
+      if (replica == 0) {  /* the replicas hold identical weights; one pipeline evaluates */
+        float acc = evaluate_pp(m, &test, b, dX, pipe);
+        if (!rank) printf("epoch %d test_acc %.4f\n", e, acc);
+      }
       fflush(stdout);
     } else if (!rank) {
       printf("epoch %d test_acc %.4f\n", e, evaluate(m, &test, b, dX, hlogits));
@@ -260,6 +274,8 @@ int main(int argc, char** argv) {
   if (ov) overlap_free(ov);
   if (o.nccl) nccl_finalize();
   if (pp > 1) pp_free();
+  MPI_Comm_free(&pipe);
+  MPI_Comm_free(&data);
   mlp_free(m);
   dataset_free(&train);
   dataset_free(&test);
