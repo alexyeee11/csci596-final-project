@@ -6,13 +6,14 @@
 #include "comm/allreduce.h"
 #include "comm/nccl.h"
 #include "comm/overlap.h"
+#include "comm/pipeline.h"
 #include "cuda_check.h"
 #include "data/cifar.h"
 #include "model/mlp.h"
 
 typedef struct {
   const char* data;
-  int synthetic, epochs, steps, batch, hidden, layers, gemm, allreduce, nccl, overlap, fp16;
+  int synthetic, epochs, steps, batch, hidden, layers, gemm, allreduce, nccl, overlap, pp, mb, fp16;
   float lr, bucket_mb;
   unsigned seed;
 } Opts;
@@ -21,12 +22,13 @@ static void usage(void) {
   fprintf(stderr,
           "usage: train (--data DIR | --synthetic) [--epochs N] [--steps N] [--batch N] [--hidden N]\n"
           "             [--layers N] [--lr X] [--seed N] [--gemm naive|tiled|regtile|cublas|wmma] [--fp16]\n"
-          "             [--allreduce naive|tree|ring|mpi|nccl] [--overlap [--bucket-mb X]]\n");
+          "             [--allreduce naive|tree|ring|mpi|nccl] [--overlap [--bucket-mb X]]\n"
+          "             [--pp P [--microbatches M]]\n");
   exit(2);
 }
 
 static Opts parse(int argc, char** argv) {
-  Opts o = {NULL, 0, 1, 0, 256, 4096, 3, -1, AR_RING, 0, 0, 0, 0.01f, 25.f, 42};
+  Opts o = {NULL, 0, 1, 0, 256, 4096, 3, -1, AR_RING, 0, 0, 1, 1, 0, 0.01f, 25.f, 42};
   for (int i = 1; i < argc; i++) {
     const char* a = argv[i];
     if (!strcmp(a, "--synthetic")) { o.synthetic = 1; continue; }
@@ -43,6 +45,8 @@ static Opts parse(int argc, char** argv) {
     else if (!strcmp(a, "--lr")) o.lr = (float)atof(v);
     else if (!strcmp(a, "--bucket-mb")) { if ((o.bucket_mb = (float)atof(v)) <= 0) usage(); }
     else if (!strcmp(a, "--seed")) o.seed = (unsigned)atoi(v);
+    else if (!strcmp(a, "--pp")) { if ((o.pp = atoi(v)) < 1) usage(); }
+    else if (!strcmp(a, "--microbatches")) { if ((o.mb = atoi(v)) < 1) usage(); }
     else if (!strcmp(a, "--gemm")) { if ((o.gemm = gemm_parse(v)) < 0) usage(); }
     else if (!strcmp(a, "--allreduce") && !strcmp(v, "nccl")) o.nccl = 1;
     else if (!strcmp(a, "--allreduce")) { if ((o.allreduce = ar_parse(v)) < 0) usage(); }
@@ -96,6 +100,43 @@ static float evaluate(MLP* m, const Dataset* d, int b, float* dX, float* hlogits
   return total ? (float)correct / total : 0.f;
 }
 
+/* Pipeline version: every rank of `pipe` walks the test set; the first stage feeds inputs, the head counts. */
+static float evaluate_pp(MLP* m, const Dataset* d, int b, float* dX, MPI_Comm pipe) {
+  int correct = 0, total = 0;
+  for (int s = 0; s + b <= d->n; s += b) {
+    if (m->first == 0)
+      CUDA_CHECK(cudaMemcpy(dX, d->X + (size_t)s * d->dim, (size_t)b * d->dim * sizeof(float), cudaMemcpyHostToDevice));
+    correct += pp_correct(m, dX, d->y + s, b, pipe);
+    total += b;
+  }
+  return total ? (float)correct / total : 0.f;
+}
+
+/* Reject flag combinations no test covers. Called on every rank; rank 0 prints. */
+static void check_opts(const Opts* o, int rank, int p) {
+  const char* err = NULL;
+  char msg[160];
+  if (o->nccl && o->overlap) err = "--overlap stages buckets through host memory; it does not combine with --allreduce nccl";
+  else if (o->pp > 1 && (o->overlap || o->nccl)) err = "--pp does not combine with --overlap or --allreduce nccl";
+  else if (o->mb > 1 && o->pp == 1) err = "--microbatches needs --pp > 1";
+  else if (o->pp > o->layers + 1) {
+    snprintf(msg, sizeof msg, "--pp %d is more than the %d layers of the model", o->pp, o->layers + 1);
+    err = msg;
+  } else if (p % o->pp) {
+    snprintf(msg, sizeof msg, "%d ranks are not a multiple of --pp %d", p, o->pp);
+    err = msg;
+  } else if (o->batch % (p / o->pp)) {
+    snprintf(msg, sizeof msg, "--batch %d is not divisible by %d ranks", o->batch, p / o->pp);
+    err = msg;
+  } else if ((o->batch / (p / o->pp)) % o->mb) {
+    snprintf(msg, sizeof msg, "per-replica batch %d is not divisible by --microbatches %d", o->batch / (p / o->pp), o->mb);
+    err = msg;
+  }
+  if (!err) return;
+  if (!rank) fprintf(stderr, "%s\n", err);
+  MPI_Abort(MPI_COMM_WORLD, 2);
+}
+
 int main(int argc, char** argv) {
   int provided;
   MPI_Init_thread(&argc, &argv, MPI_THREAD_SERIALIZED, &provided);
@@ -113,16 +154,16 @@ int main(int argc, char** argv) {
     if (!rank) fprintf(stderr, "--overlap needs MPI_THREAD_SERIALIZED; this MPI provides level %d\n", provided);
     MPI_Abort(MPI_COMM_WORLD, 2);
   }
-  if (o.nccl && o.overlap) {
-    if (!rank) fprintf(stderr, "--overlap stages buckets through host memory; it does not combine with --allreduce nccl\n");
-    MPI_Abort(MPI_COMM_WORLD, 2);
-  }
+  check_opts(&o, rank, p);
   if (o.nccl) nccl_init(MPI_COMM_WORLD);  /* exits with a message when built without NCCL */
-  if (o.batch % p) {
-    if (!rank) fprintf(stderr, "--batch %d is not divisible by %d ranks\n", o.batch, p);
-    MPI_Abort(MPI_COMM_WORLD, 2);
-  }
-  int b = o.batch / p;
+  /* dp x pp grid: stage = rank / dp, replica = rank % dp, so with 2 GPUs per node the data-parallel peers of a stage
+     share a node and the gradient all-reduce stays intra-node where it can. pipe: one replica's stages in order;
+     data: one stage's replicas. Without --pp, dp = p and data = the world. */
+  const int pp = o.pp, dp = p / pp, replica = rank % dp, stage = rank / dp;
+  int b = o.batch / dp;
+  MPI_Comm pipe, data;
+  MPI_Comm_split(MPI_COMM_WORLD, replica, stage, &pipe);
+  MPI_Comm_split(MPI_COMM_WORLD, stage, replica, &data);
 
   Dataset train, test;
   if (o.synthetic) {
@@ -137,7 +178,9 @@ int main(int argc, char** argv) {
   sizes[ns++] = train.dim;
   for (int l = 0; l < o.layers; l++) sizes[ns++] = o.hidden;
   sizes[ns++] = 10;
-  MLP* m = mlp_create(sizes, ns, b, o.seed, (gemm_impl)o.gemm);
+  int lfirst = 0, llast = ns - 1;
+  if (pp > 1) pp_split(ns - 1, pp, stage, &lfirst, &llast);
+  MLP* m = mlp_create_range(sizes, ns, lfirst, llast, b, o.seed, (gemm_impl)o.gemm);
   if (o.fp16) mlp_enable_fp16(m);  /* exits on a pre-sm_70 GPU */
 
   float* hX = malloc((size_t)b * train.dim * sizeof(float));
@@ -149,7 +192,9 @@ int main(int argc, char** argv) {
   CUDA_CHECK(cudaMalloc((void**)&dy, b * sizeof(int)));
   float* hgrad = NULL;  /* pinned staging buffer for the host all-reduce */
   Overlap* ov = NULL;     /* with --overlap, buckets are all-reduced on a comm thread during backward */
-  if (p > 1 && o.overlap) {
+  if (pp > 1) {
+    if (dp > 1) CUDA_CHECK(cudaMallocHost((void**)&hgrad, m->nparams * sizeof(float)));  /* this stage's grads */
+  } else if (p > 1 && o.overlap) {
     size_t bucket = (size_t)(o.bucket_mb * (1 << 20) / sizeof(float));
     ov = overlap_create(m->grads, m->nparams, bucket ? bucket : 1, (ar_algo)o.allreduce, MPI_COMM_WORLD, lrank % ndev);
   } else if (p > 1 && !o.nccl)
@@ -160,15 +205,38 @@ int main(int argc, char** argv) {
   for (int e = 0; e < o.epochs && !done; e++) {
     shuffle(perm, train.n, o.seed + e);
     for (int s = 0; s < steps_per_epoch && !done; s++) {
-      /* rank r takes samples r, r+p, r+2p, ... of the global batch */
+      /* replica r takes samples r, r+dp, r+2dp, ... of the global batch */
       for (int k = 0; k < b; k++) {
-        int idx = perm[s * o.batch + rank + k * p];
+        int idx = perm[s * o.batch + replica + k * dp];
         memcpy(hX + (size_t)k * train.dim, train.X + (size_t)idx * train.dim, train.dim * sizeof(float));
         hy[k] = train.y[idx];
       }
       CUDA_CHECK(cudaMemcpy(dX, hX, (size_t)b * train.dim * sizeof(float), cudaMemcpyHostToDevice));
       CUDA_CHECK(cudaMemcpy(dy, hy, b * sizeof(int), cudaMemcpyHostToDevice));
 
+      if (pp > 1) {
+        /* compute_s: mean over ranks of each rank's kernel time (incl. SGD); comm_s: the rest of the slowest rank's
+           step, i.e. activation transfers, bubble and (dp > 1) the stage's gradient all-reduce */
+        double busy, t0 = now();
+        float loss = pp_step(m, dX, dy, b, o.mb, pipe, &busy), gl;
+        if (dp > 1) {
+          CUDA_CHECK(cudaMemcpy(hgrad, m->grads, m->nparams * sizeof(float), cudaMemcpyDeviceToHost));
+          allreduce_sum(hgrad, m->nparams, (ar_algo)o.allreduce, data);
+          CUDA_CHECK(cudaMemcpy(m->grads, hgrad, m->nparams * sizeof(float), cudaMemcpyHostToDevice));
+        }
+        double t1 = now();
+        mlp_sgd(m, o.lr, 1.0f / (o.mb * dp));  /* sum over M micro-batches and dp replicas / (M dp) = batch mean */
+        CUDA_CHECK(cudaStreamSynchronize(0));
+        double t2 = now(), st[2] = {busy + (t2 - t1), t2 - t0}, sum, mx;
+        MPI_Allreduce(&loss, &gl, 1, MPI_FLOAT, MPI_SUM, data);  /* every stage has its replica's loss */
+        loss = gl / dp;
+        MPI_Reduce(&st[0], &sum, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+        MPI_Reduce(&st[1], &mx, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+        if (!rank) printf("step %d loss %.6f compute_s %.6f comm_s %.6f step_s %.6f\n", step, loss, sum / p, mx - sum / p, mx);
+        step++;
+        if (o.steps && step >= o.steps) done = 1;
+        continue;
+      }
       /* compute_s: forward + backward until the default stream is idle (not cudaDeviceSynchronize, which would also
          wait for the overlap copies); comm_s: communication still outstanding after that; step_s: whole step */
       double t0 = now();
@@ -196,7 +264,13 @@ int main(int argc, char** argv) {
       step++;
       if (o.steps && step >= o.steps) done = 1;
     }
-    if (!rank) {
+    if (pp > 1) {
+      if (replica == 0) {  /* the replicas hold identical weights; one pipeline evaluates */
+        float acc = evaluate_pp(m, &test, b, dX, pipe);
+        if (!rank) printf("epoch %d test_acc %.4f\n", e, acc);
+      }
+      fflush(stdout);
+    } else if (!rank) {
       printf("epoch %d test_acc %.4f\n", e, evaluate(m, &test, b, dX, hlogits));
       fflush(stdout);
     }
@@ -207,6 +281,9 @@ int main(int argc, char** argv) {
   if (hgrad) cudaFreeHost(hgrad);
   if (ov) overlap_free(ov);
   if (o.nccl) nccl_finalize();
+  if (pp > 1) pp_free();
+  MPI_Comm_free(&pipe);
+  MPI_Comm_free(&data);
   mlp_free(m);
   dataset_free(&train);
   dataset_free(&test);
