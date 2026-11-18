@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "cuda_check.h"
+#include "kernels/gemm_h.h"
 #include "kernels/layers.h"
 #include "model/mlp.h"
 
@@ -140,6 +141,60 @@ int main(void) {
     free(gf); free(gs);
   }
   cudaFree(dX8); cudaFree(dy8); cudaFree(dH); cudaFree(dlog); cudaFree(lbuf);
+
+  /* 6. FP16 (both FP16 GEMMs) vs FP32 on a small network: per-layer gradients (unscaled) and loss within 1e-2
+     relative, before and after one SGD step (checks the loss-scale division and the FP16 weight refresh) */
+  if (!gemm_h_supported()) {
+    printf("test_mlp: fp16 check skipped (needs sm_70+)\n");
+  } else {
+    const int s16[] = {64, 128, 64, 10};
+    enum { HB = 32 };
+    float Xh[HB * 64];
+    int yh[HB];
+    for (int i = 0; i < HB * 64; i++) Xh[i] = rnd();
+    for (int i = 0; i < HB; i++) yh[i] = i % 10;
+    float* dXh; int* dyh;
+    CUDA_CHECK(cudaMalloc(&dXh, sizeof Xh));
+    CUDA_CHECK(cudaMalloc(&dyh, sizeof yh));
+    CUDA_CHECK(cudaMemcpy(dXh, Xh, sizeof Xh, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(dyh, yh, sizeof yh, cudaMemcpyHostToDevice));
+    const gemm_impl hi[2] = {GEMM_WMMA, GEMM_CUBLAS};
+    for (int t = 0; t < 2; t++) {
+      MLP* r = mlp_create(s16, 4, HB, 123, GEMM_CUBLAS);
+      MLP* h = mlp_create(s16, 4, HB, 123, hi[t]);
+      mlp_enable_fp16(h);
+      size_t nh = r->nparams;
+      float *g32 = (float*)malloc(nh * 4), *g16 = (float*)malloc(nh * 4);
+      for (int step = 0; step < 2; step++) {
+        float l32 = mlp_forward_backward(r, dXh, dyh, HB, NULL, NULL);
+        float l16 = mlp_forward_backward(h, dXh, dyh, HB, NULL, NULL);
+        CUDA_CHECK(cudaMemcpy(g32, r->grads, nh * 4, cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(g16, h->grads, nh * 4, cudaMemcpyDeviceToHost));
+        if (!(fabsf(l16 - l32) <= 1e-2f * fabsf(l32))) {
+          printf("FAIL fp16 impl %d step %d: loss %g vs fp32 %g\n", hi[t], step, l16, l32);
+          fails++;
+        }
+        for (int l = 0; l < r->nlayers; l++) {
+          size_t o = r->L[l].dW - r->grads, len = (size_t)r->L[l].in * r->L[l].out + r->L[l].out;
+          double num = 0, den = 0;
+          for (size_t i = o; i < o + len; i++) {
+            double d = g16[i] / h->loss_scale - g32[i];
+            num += d * d;
+            den += (double)g32[i] * g32[i];
+          }
+          if (!(sqrt(num) <= 1e-2 * sqrt(den))) {
+            printf("FAIL fp16 impl %d step %d layer %d: grad rel err %g\n", hi[t], step, l, sqrt(num / den));
+            fails++;
+          }
+        }
+        mlp_sgd(r, 0.5f, 1.0f);
+        mlp_sgd(h, 0.5f, 1.0f);
+      }
+      mlp_free(r); mlp_free(h);
+      free(g32); free(g16);
+    }
+    cudaFree(dXh); cudaFree(dyh);
+  }
 
   printf(fails ? "test_mlp: FAIL (%d)\n" : "test_mlp: PASS\n", fails);
   return fails != 0;

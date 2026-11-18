@@ -43,6 +43,16 @@ __global__ void sgd_k(float* w, const float* g, float lr, size_t n) {
   if (i < n) w[i] -= lr * g[i];
 }
 
+__global__ void scale_k(float* x, float s, size_t n) {
+  size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
+  if (i < n) x[i] *= s;
+}
+
+__global__ void f32_to_f16_k(__half* dst, const float* src, size_t n) {
+  size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
+  if (i < n) dst[i] = __float2half(src[i]);
+}
+
 void bias_act_forward(float* Y, const float* b, int rows, int cols, int relu) {
   bias_act_k<<<blocks((size_t)rows * cols), 256>>>(Y, b, rows, cols, relu);
   CUDA_CHECK(cudaGetLastError());
@@ -73,5 +83,15 @@ float softmax_xent(const float* logits, const int* labels, float* dlogits, float
 
 void sgd_step(float* w, const float* g, float lr, size_t n) {
   sgd_k<<<blocks(n), 256>>>(w, g, lr, n);
+  CUDA_CHECK(cudaGetLastError());
+}
+
+void scale_f32(float* x, float s, size_t n) {
+  scale_k<<<blocks(n), 256>>>(x, s, n);
+  CUDA_CHECK(cudaGetLastError());
+}
+
+void f32_to_f16(__half* dst, const float* src, size_t n) {
+  f32_to_f16_k<<<blocks(n), 256>>>(dst, src, n);
   CUDA_CHECK(cudaGetLastError());
 }
