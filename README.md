@@ -54,6 +54,10 @@ All configurations must reach the same test accuracy as the 1-GPU run. An MLP on
 - [All-reduce cost vs. the α–β model](results/comm/allreduce_model.png), with the fitted parameters in [alpha_beta.txt](results/comm/alpha_beta.txt).
 - [Strong and weak scaling, 1 → 8 GPUs](results/scaling/scaling.png) ([summary.csv](results/scaling/summary.csv)): with ~152 MB of gradients and only ~17 ms of compute per step, the host-staged all-reduce dominates, so 8 GPUs are ~6× slower per step than 1. Overlap hides 15–18% of the step. Every strong-scaling run ends at the same loss as the 1-GPU run.
 
+**FP16 on a V100:**
+- [GEMM GFLOP/s](results/gemm/v100.png) ([csv](results/gemm/v100.csv)): our tensor-core WMMA kernel reaches 22.1 TFLOP/s at 4096³. That is 2.85× our register-tiled FP32 kernel and 1.6× FP32 cuBLAS, but only 25% of cuBLAS FP16 (89.7 TFLOP/s).
+- [Training step time, FP32 vs FP16](results/fp16/summary.txt) (1 GPU, batch 512, hidden 4096): our own kernels go from 22.5 ms to 8.8 ms per step (2.6×), and cuBLAS goes from 11.3 ms to 3.6 ms (3.2×). FP16 test accuracy matches FP32 within 0.001 after 5 CIFAR-10 epochs.
+
 ## Build and Run
 
 > Everything below works today. Multi-node jobs need `--partition=gpu`, because the `debug` partition only allows one node.
