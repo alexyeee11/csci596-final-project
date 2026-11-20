@@ -47,6 +47,8 @@ awk -v a="$f32" -v b="$f16" 'BEGIN {
   ok = a != "" && b != "" && d <= 0.02
   printf "cifar fp32 test_acc %s fp16 test_acc %s diff %.4f: %s\n", a, b, d, ok ? "PASS" : "FAIL"
   exit !ok }' || status=1
-echo "== acceptance 3: 2-rank data parallel, FP16 (want 4 PASS) =="
+echo "== acceptance 3: 2-rank data parallel, FP16 (want 4 PASS, then 4 PASS with --overlap, then 1 nccl PASS) =="
 scripts/test_dp.sh 2 --fp16 || status=1
+scripts/test_dp.sh 2 --fp16 --overlap || status=1
+ALGOS=nccl scripts/test_dp.sh 2 --fp16 || status=1
 exit $status
