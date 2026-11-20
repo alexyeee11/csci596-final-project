@@ -2,7 +2,7 @@
 
 Final project for CSCI 596 (Scientific Computing and Visualization), Fall 2026.
 
-> **Status:** Milestone 2 complete. On top of Milestone 1 (kernels, MLP, trainer, hand-written all-reduce, data-parallel training that matches the 1-GPU loss curve), we added a register-tiled GEMM (3.1× our tiled kernel, 63% of cuBLAS on a P100), an α–β model of all-reduce cost, bucketed all-reduce overlapped with backprop, an NCCL baseline, and the first 1 → 8 GPU scaling sweep. Next: tensor-core FP16 GEMM and GPipe pipeline parallelism. See the [design spec](docs/superpowers/specs/2026-10-28-mini-ddp-cuda-mpi-design.md) and the plans for [Milestone 1](docs/superpowers/plans/2026-10-28-mini-ddp-milestone1.md) and [Milestone 2](docs/superpowers/plans/2026-11-05-mini-ddp-milestone2.md).
+> **Status:** Milestone 3 FP16 and pipeline work complete. On top of Milestones 1 and 2 (kernels, MLP, data-parallel training that matches the 1-GPU loss curve, register-tiled GEMM, α–β all-reduce model, overlap, NCCL baseline, 1 → 8 GPU scaling), we added a tensor-core WMMA GEMM (2.85× our register-tiled kernel on a V100), mixed-precision training with FP32 master weights, and GPipe pipeline parallelism with micro-batches. See the [design spec](docs/superpowers/specs/2026-10-28-mini-ddp-cuda-mpi-design.md) and the plans for [Milestone 1](docs/superpowers/plans/2026-10-28-mini-ddp-milestone1.md), [Milestone 2](docs/superpowers/plans/2026-11-05-mini-ddp-milestone2.md), [Milestone 3 FP16](docs/superpowers/plans/2026-11-12-mini-ddp-milestone3-fp16.md) and [Milestone 3 pipeline](docs/superpowers/plans/2026-11-12-mini-ddp-milestone3-pipeline.md).
 
 ## Problem
 
@@ -45,7 +45,7 @@ One MPI rank drives one GPU. The model is an MLP for CIFAR-10 (3072 → 4096 →
 | Overlap on/off and bucket-size sweep | How much communication can be hidden behind backprop (with Nsight timelines) |
 | Pipeline bubble vs. micro-batch count | Measured idle time vs. the theoretical (P−1)/(M+P−1) |
 | 2D layouts at 8 GPUs | Which data × pipeline split trains fastest |
-| FP32 vs. FP16 | Speedup from tensor cores and from halving all-reduce volume |
+| FP32 vs. FP16 | Speedup from tensor cores, and an α–β estimate of what FP16 all-reduce would save |
 
 All configurations must reach the same test accuracy as the 1-GPU run. An MLP on CIFAR-10 tops out around 55%, so the point is matching accuracy, not high accuracy.
 
@@ -104,7 +104,7 @@ sbatch --account=<class account> --partition=gpu --nodes=2 --ntasks=4 --ntasks-p
 - [x] Nov 10 — data-parallel training matches the 1-GPU loss curve (done Nov 5: 2 and 4 GPUs, all four all-reduce algorithms)
 - [x] Nov 17 — overlap + bucketing; first 1 → 8 GPU scaling plot
 - [x] Nov 20 — agree on topic with the instructor (discussed and agreed)
-- [ ] Nov 24 — tensor-core FP16 GEMM; GPipe pipeline
+- [x] Nov 24 — tensor-core FP16 GEMM; GPipe pipeline (done Nov 19)
 - [ ] Nov 30 / Dec 2 — one-minute in-class presentation (from this repo)
 - [ ] Dec 11 — final repo due; submit URL to Brightspace
 
