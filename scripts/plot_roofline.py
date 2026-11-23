@@ -12,10 +12,13 @@ rows = {}  # latest row wins per (label, M, N, K)
 for r in csv.DictReader(open(sys.argv[1])):
     rows[(r["label"], r["M"], r["N"], r["K"])] = r
 rows = list(rows.values())
-gpu = rows[0]["gpu"]
-variant = next((v for v in ROOFS if v in gpu), None)
-if variant is None:
-    sys.exit(f"plot_roofline: unknown GPU '{gpu}' (want PCIE or SXM2 in the name)")
+for g in {r["gpu"] for r in rows}:
+    if not any(v in g for v in ROOFS):
+        sys.exit(f"plot_roofline: unknown GPU '{g}' (want PCIE or SXM2 in the name)")
+variants = sorted({v for r in rows for v in ROOFS if v in r["gpu"]})
+if len(variants) != 1:
+    sys.exit(f"plot_roofline: CSV mixes GPU variants {variants}; split it first")
+variant = variants[0]
 fp32, tensor = ROOFS[variant]
 
 fig, ax = plt.subplots(figsize=(8, 5.5))

@@ -24,7 +24,7 @@ mkdir -p results/roofline
 OUT=results/roofline/v100.csv
 [ -f $OUT ] || echo label,impl,gpu,M,N,K,flops,dram_bytes,ncu_time_s,bench_time_s,source > $OUT
 TMP=$(mktemp)
-trap 'rm -f $TMP' EXIT
+trap 'rm -f $TMP $TMP.out' EXIT
 METRICS=dram__bytes_read.sum,dram__bytes_write.sum,gpu__time_duration.sum
 
 # counter check on a tiny case
@@ -55,7 +55,8 @@ for i in $RUN; do
     if [ $BLOCKED = 1 ]; then
       bytes=$(( (M * K + K * N) * es + M * N * 4 )) nt= src=analytic
     else
-      ncu --profile-from-start off --metrics $METRICS --csv --print-units base --log-file $TMP ./bin/bench_gemm $i $M $N $K 0 0 > /dev/null
+      : > $TMP
+      ncu --profile-from-start off --metrics $METRICS --csv --print-units base --log-file $TMP ./bin/bench_gemm $i $M $N $K 0 0 > /dev/null || { cat $TMP; exit 1; }
       read -r bytes nt < <(python3 -I scripts/ncu_sum.py $TMP)
       src=ncu
     fi
