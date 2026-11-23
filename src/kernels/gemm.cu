@@ -8,6 +8,10 @@
 
 #define TILE 32
 
+#define CUBLAS_CHECK(x) do { cublasStatus_t s_ = (x); if (s_ != CUBLAS_STATUS_SUCCESS) { \
+    fprintf(stderr, "cuBLAS error %s:%d: status %d\n", __FILE__, __LINE__, (int)s_); \
+    exit(1); } } while (0)
+
 __device__ __forceinline__ float ldA(const float* A, int ta, int M, int K, int i, int k) {
   return ta ? A[(size_t)k * M + i] : A[(size_t)i * K + k];
 }
@@ -178,7 +182,7 @@ __global__ void __launch_bounds__(128) gemm_wmma_k(int M, int N, int K, float al
 
 static cublasHandle_t handle(void) {
   static cublasHandle_t h = NULL;
-  if (!h) cublasCreate(&h);
+  if (!h) CUBLAS_CHECK(cublasCreate(&h));
   return h;
 }
 
@@ -193,8 +197,8 @@ void gemm(gemm_impl impl, int transA, int transB, int M, int N, int K,
   if (impl == GEMM_WMMA) { fprintf(stderr, "wmma needs --fp16\n"); exit(1); }
   if (impl == GEMM_CUBLAS) {
     /* cuBLAS is column-major: compute C^T = op(B)^T * op(A)^T, which is row-major C. */
-    cublasSgemm(handle(), transB ? CUBLAS_OP_T : CUBLAS_OP_N, transA ? CUBLAS_OP_T : CUBLAS_OP_N,
-                N, M, K, &alpha, B, transB ? K : N, A, transA ? M : K, &beta, C, N);
+    CUBLAS_CHECK(cublasSgemm(handle(), transB ? CUBLAS_OP_T : CUBLAS_OP_N, transA ? CUBLAS_OP_T : CUBLAS_OP_N,
+                N, M, K, &alpha, B, transB ? K : N, A, transA ? M : K, &beta, C, N));
     return;
   }
   if (impl == GEMM_REGTILE) {
@@ -220,9 +224,9 @@ void gemm_h(gemmh_impl impl, int transA, int transB, int M, int N, int K,
             float alpha, const __half* A, const __half* B, float beta, float* C) {
   if (impl == GEMMH_CUBLAS) {
     /* same row-major trick as the FP32 call: C^T = op(B)^T * op(A)^T */
-    cublasGemmEx(handle(), transB ? CUBLAS_OP_T : CUBLAS_OP_N, transA ? CUBLAS_OP_T : CUBLAS_OP_N,
+    CUBLAS_CHECK(cublasGemmEx(handle(), transB ? CUBLAS_OP_T : CUBLAS_OP_N, transA ? CUBLAS_OP_T : CUBLAS_OP_N,
                  N, M, K, &alpha, B, CUDA_R_16F, transB ? K : N, A, CUDA_R_16F, transA ? M : K,
-                 &beta, C, CUDA_R_32F, N, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+                 &beta, C, CUDA_R_32F, N, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT));
     return;
   }
   if (!gemm_h_supported()) { fprintf(stderr, "gemm_h: wmma needs an sm_70+ GPU (tensor cores)\n"); exit(1); }
