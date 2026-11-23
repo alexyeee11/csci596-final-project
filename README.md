@@ -2,7 +2,7 @@
 
 Final project for CSCI 596 (Scientific Computing and Visualization), Fall 2026.
 
-> **Status:** Milestone 3 FP16 and pipeline work complete. On top of Milestones 1 and 2 (kernels, MLP, data-parallel training that matches the 1-GPU loss curve, register-tiled GEMM, α–β all-reduce model, overlap, NCCL baseline, 1 → 8 GPU scaling), we added a tensor-core WMMA GEMM (2.85× our register-tiled kernel on a V100), mixed-precision training with FP32 master weights, and GPipe pipeline parallelism with micro-batches. See the [design spec](docs/superpowers/specs/2026-10-28-mini-ddp-cuda-mpi-design.md) and the plans for [Milestone 1](docs/superpowers/plans/2026-10-28-mini-ddp-milestone1.md), [Milestone 2](docs/superpowers/plans/2026-11-05-mini-ddp-milestone2.md), [Milestone 3 FP16](docs/superpowers/plans/2026-11-12-mini-ddp-milestone3-fp16.md) and [Milestone 3 pipeline](docs/superpowers/plans/2026-11-12-mini-ddp-milestone3-pipeline.md).
+> **Status:** Milestone 3 complete; Milestone 4 in progress (roofline and the faster WMMA kernel are done). On top of Milestones 1 and 2 (kernels, MLP, data-parallel training that matches the 1-GPU loss curve, register-tiled GEMM, α–β all-reduce model, overlap, NCCL baseline, 1 → 8 GPU scaling), we added a tensor-core WMMA GEMM (34 TFLOP/s on a V100, 4.4× our register-tiled kernel), a roofline, mixed-precision training with FP32 master weights, and GPipe pipeline parallelism with micro-batches. See the [design spec](docs/superpowers/specs/2026-10-28-mini-ddp-cuda-mpi-design.md) and the plans for [Milestone 1](docs/superpowers/plans/2026-10-28-mini-ddp-milestone1.md), [Milestone 2](docs/superpowers/plans/2026-11-05-mini-ddp-milestone2.md), [Milestone 3 FP16](docs/superpowers/plans/2026-11-12-mini-ddp-milestone3-fp16.md), [Milestone 3 pipeline](docs/superpowers/plans/2026-11-12-mini-ddp-milestone3-pipeline.md), and Milestone 4 ([design](docs/superpowers/specs/2026-11-20-mini-ddp-milestone4-design.md), [kernels](docs/superpowers/plans/2026-11-20-mini-ddp-milestone4a-roofline.md), [experiments](docs/superpowers/plans/2026-11-20-mini-ddp-milestone4b-experiments.md)).
 
 ## Problem
 
@@ -54,9 +54,21 @@ All configurations must reach the same test accuracy as the 1-GPU run. An MLP on
 - [All-reduce cost vs. the α–β model](results/comm/allreduce_model.png), with the fitted parameters in [alpha_beta.txt](results/comm/alpha_beta.txt).
 - [Strong and weak scaling, 1 → 8 GPUs](results/scaling/scaling.png) ([summary.csv](results/scaling/summary.csv)): with ~152 MB of gradients and only ~17 ms of compute per step, the host-staged all-reduce dominates, so 8 GPUs are ~6× slower per step than 1. Overlap hides 15–18% of the step. Every strong-scaling run ends at the same loss as the 1-GPU run.
 
-**FP16 on a V100:**
-- [GEMM GFLOP/s](results/gemm/v100.png) ([csv](results/gemm/v100.csv)): our tensor-core WMMA kernel reaches 22.1 TFLOP/s at 4096³. That is 2.85× our register-tiled FP32 kernel and 1.6× FP32 cuBLAS, but only 25% of cuBLAS FP16 (89.7 TFLOP/s).
-- [Training step time, FP32 vs FP16](results/fp16/summary.txt) (1 GPU, batch 512, hidden 4096): our own kernels go from 22.5 ms to 8.8 ms per step (2.6×), and cuBLAS goes from 11.3 ms to 3.6 ms (3.2×). FP16 test accuracy matches FP32 within 0.001 after 5 CIFAR-10 epochs.
+**FP16 on a V100 (PCIe, 14 TFLOP/s FP32 / 112 TFLOP/s tensor peak):**
+- [GEMM GFLOP/s](results/gemm/v100.png) ([csv](results/gemm/v100.csv)): our tensor-core WMMA kernel reaches 34.1 TFLOP/s at 4096³. That is 4.4× our register-tiled FP32 kernel and 2.6× FP32 cuBLAS, and 39% of cuBLAS FP16 (88.3 TFLOP/s).
+- [Roofline](results/roofline/v100.png) ([csv](results/roofline/v100.csv)): CARC blocks GPU performance counters (`ERR_NVGPUCTRPERM`), so the DRAM bytes are the analytical minimum, not measured by Nsight Compute. At these sizes every GEMM sits far right of the ridge, so each kernel's distance below its roof is its own inefficiency, not a bandwidth limit.
+- The WMMA kernel step by step, at 4096³ (1 V100, real inputs):
+
+  | Version | TFLOP/s | % of tensor peak |
+  |---|---|---|
+  | scalar 2-byte tile loads (Milestone 3a) | 22.1 | 20% |
+  | + 16-byte loads for aligned, fully inside tiles | 29–32 | 27% |
+  | + register double buffering of the next K tile | 34.1 | 30% |
+  | cuBLAS FP16 (reference) | 88.3 | 79% |
+
+  Most of the remaining gap to cuBLAS is the 64×64 block tile: a 128×128 tile reuses each loaded byte twice as often. That is future work.
+- [Training step time, FP32 vs FP16](results/fp16/summary.txt) (1 GPU, batch 512, hidden 4096): with our own kernels a step goes from 22.5 ms (FP32 regtile) to 5.9 ms (FP16 WMMA), 3.8× faster and 1.9× faster than FP32 cuBLAS (11.3 ms). With cuBLAS, FP16 is 3.4 ms (3.3×). FP16 test accuracy matches FP32 within 0.001 after 5 CIFAR-10 epochs.
+- Run-to-run variance between CARC jobs is about ±5–10%, depending on the node; numbers above are single jobs.
 
 ## Build and Run
 

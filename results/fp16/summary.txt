@@ -1,6 +1,6 @@
 median over steps 5-29, 1 V100, batch 512, seconds
 run             compute_s     step_s
-fp32_regtile     0.021839   0.022528
-fp32_cublas      0.010616   0.011305
-fp16_wmma        0.007739   0.008788
-fp16_cublas      0.002510   0.003560
+fp32_regtile     0.021856   0.022547
+fp32_cublas      0.010613   0.011303
+fp16_wmma        0.004842   0.005894
+fp16_cublas      0.002339   0.003391
