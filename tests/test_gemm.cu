@@ -91,10 +91,11 @@ int main(void) {
   if (gemm_h_supported()) {
     fails += run_all(1, GEMMH_WMMA, "wmma");
     /* 128^3: every wmma tile takes the 16-byte path; A one half off an aligned allocation forces the scalar
-       path for every A tile of the same shape */
-    for (int ta = 0; ta < 2; ta++)
-      for (int tb = 0; tb < 2; tb++)
-        for (int off = 0; off < 2; off++) fails += run_case(1, GEMMH_WMMA, "wmma", 128, 128, 128, ta, tb, off);
+       path for every A tile of the same shape. K = 136 mixes 16-byte K tiles with a scalar zero-filled K tail. */
+    for (int k = 128; k <= 136; k += 8)
+      for (int ta = 0; ta < 2; ta++)
+        for (int tb = 0; tb < 2; tb++)
+          for (int off = 0; off < 2; off++) fails += run_case(1, GEMMH_WMMA, "wmma", 128, 128, k, ta, tb, off);
     fails += run_all(1, GEMMH_CUBLAS, "cublas_fp16");
   } else {
     printf("test_gemm: fp16 cases skipped (needs sm_70+)\n");
