@@ -96,6 +96,9 @@ int main(void) {
       for (int ta = 0; ta < 2; ta++)
         for (int tb = 0; tb < 2; tb++)
           for (int off = 0; off < 2; off++) fails += run_case(1, GEMMH_WMMA, "wmma", 128, 128, k, ta, tb, off);
+    /* K == WK: one 16-byte tile staged before the K loop, nothing to prefetch */
+    for (int ta = 0; ta < 2; ta++)
+      for (int tb = 0; tb < 2; tb++) fails += run_case(1, GEMMH_WMMA, "wmma", 128, 128, 32, ta, tb, 0);
     fails += run_all(1, GEMMH_CUBLAS, "cublas_fp16");
   } else {
     printf("test_gemm: fp16 cases skipped (needs sm_70+)\n");

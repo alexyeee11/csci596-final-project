@@ -103,8 +103,8 @@ __global__ void __launch_bounds__(256) gemm_regtile_k(int ta, int tb, int M, int
    so a transposed operand is just a col_major fragment view. Rows are padded by 8 halves, which keeps ldm a
    multiple of 8 and every fragment pointer 32-byte aligned (all offsets are multiples of 16 halves), whatever
    the global shape or leading dimension.
-   ponytail: one K tile in flight per block; register double buffering of the next tile, then larger block
-   tiles, are what is left before chasing cuBLAS. */
+   The next K tile is prefetched into registers while the MMAs run on the current one (smem single-buffered).
+   ponytail: larger block tiles (128x128, 8 warps) are what is left before chasing cuBLAS. */
 #define WT 64
 #define WK 32
 #define WPAD 8  /* smem row strides (WK or WT) + WPAD = 40 and 72 halves = 80 and 144 bytes: 16-byte multiples */
@@ -130,11 +130,16 @@ __device__ __forceinline__ void wmma_st(__half* s, const uint4* v) {
   }
 }
 
+template <int R, int C>
+__device__ __forceinline__ bool wmma_fast(const __half* g, int rows, int cols, int r0, int c0) {
+  return r0 + R <= rows && c0 + C <= cols && cols % 8 == 0 && ((size_t)g & 15) == 0;
+}
+
 /* Copy the R x C tile at (r0, c0) of a rows x cols row-major matrix into s (row stride C + WPAD), zero-filling
    outside the matrix. The path choice depends only on kernel arguments and the tile, so it is block-uniform. */
 template <int R, int C>
 __device__ __forceinline__ void wmma_stage(__half* s, const __half* g, int rows, int cols, int r0, int c0) {
-  if (r0 + R <= rows && c0 + C <= cols && cols % 8 == 0 && ((size_t)g & 15) == 0) {
+  if (wmma_fast<R, C>(g, rows, cols, r0, c0)) {
     uint4 v[R * C / 1024];
     wmma_ld<R, C>(v, g, cols, r0, c0);
     wmma_st<R, C>(s, v);
@@ -166,10 +171,20 @@ __global__ void __launch_bounds__(128) gemm_wmma_k(int M, int N, int K, float al
   for (int r = 0; r < 2; r++)
 #pragma unroll
     for (int c = 0; c < 2; c++) wmma::fill_fragment(acc[r][c], 0.f);
+  /* stored tile shapes (rows x cols) and matrix shapes of A and B */
+  constexpr int AR = TA ? WK : WT, AC = TA ? WT : WK, BR = TB ? WT : WK, BC = TB ? WK : WT;
+  const int ar = TA ? K : M, ac = TA ? M : K, br = TB ? N : K, bc = TB ? K : N;
+  wmma_stage<AR, AC>(As, A, ar, ac, TA ? 0 : i0, TA ? i0 : 0);
+  wmma_stage<BR, BC>(Bs, B, br, bc, TB ? j0 : 0, TB ? 0 : j0);
+  __syncthreads();
   for (int k0 = 0; k0 < K; k0 += WK) {
-    if (TA) wmma_stage<WK, WT>(As, A, K, M, k0, i0); else wmma_stage<WT, WK>(As, A, M, K, i0, k0);
-    if (TB) wmma_stage<WT, WK>(Bs, B, N, K, j0, k0); else wmma_stage<WK, WT>(Bs, B, K, N, k0, j0);
-    __syncthreads();
+    /* issue the next tile's 16-byte loads now; they land in registers while the MMAs below run */
+    int k1 = k0 + WK, ra = TA ? k1 : i0, ca = TA ? i0 : k1, rb = TB ? j0 : k1, cb = TB ? k1 : j0;
+    bool more = k1 < K, fa = more && wmma_fast<AR, AC>(A, ar, ac, ra, ca),
+         fb = more && wmma_fast<BR, BC>(B, br, bc, rb, cb);
+    uint4 va[AR * AC / 1024], vb[BR * BC / 1024];
+    if (fa) wmma_ld<AR, AC>(va, A, ac, ra, ca);
+    if (fb) wmma_ld<BR, BC>(vb, B, bc, rb, cb);
 #pragma unroll
     for (int kk = 0; kk < WK; kk += 16) {
       wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, LA> a[2];
@@ -185,10 +200,16 @@ __global__ void __launch_bounds__(128) gemm_wmma_k(int M, int N, int K, float al
 #pragma unroll
         for (int c = 0; c < 2; c++) wmma::mma_sync(acc[r][c], a[r], b[c], acc[r][c]);
     }
-    __syncthreads();
+    __syncthreads();  /* all MMA reads of this tile are done: As/Bs may be overwritten */
+    if (more) {  /* block-uniform, so the barrier inside is safe */
+      /* ponytail: tiles off the 16-byte path (edges, K tail, misaligned) are still loaded synchronously here */
+      if (fa) wmma_st<AR, AC>(As, va); else wmma_stage<AR, AC>(As, A, ar, ac, ra, ca);
+      if (fb) wmma_st<BR, BC>(Bs, vb); else wmma_stage<BR, BC>(Bs, B, br, bc, rb, cb);
+      __syncthreads();
+    }
   }
   /* fragments can't be stored to ragged global edges: go through shared memory. Reusing smem is safe because
-     the K loop's last __syncthreads ends every read of As and Bs. */
+     the barrier after the last tile's MMAs (or after the first staging, if K == 0) ends every use of As/Bs. */
   float* Cs = (float*)smem;
 #pragma unroll
   for (int r = 0; r < 2; r++)
