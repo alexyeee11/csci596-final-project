@@ -28,12 +28,14 @@ ax.plot(xs, [min(BW * x, fp32) for x in xs], "k--", label=f"FP32 {fp32 / 1e12:g}
 
 impls = list(dict.fromkeys(r["impl"] for r in rows))
 shapes = list(dict.fromkeys((r["M"], r["N"], r["K"]) for r in rows))
+seen = {}  # labels of one impl at one shape (wmma, wmma_vec, ...) share an x: stack them
 for r in rows:
     f = float(r["flops"])
     ax.scatter(f / float(r["dram_bytes"]), f / float(r["bench_time_s"]),
                marker="osD^vP*X"[impls.index(r["impl"]) % 8], color=f"C{shapes.index((r['M'], r['N'], r['K']))}", s=50, zorder=3)
+    n = seen[(r["impl"], r["M"], r["N"], r["K"])] = seen.get((r["impl"], r["M"], r["N"], r["K"]), -1) + 1
     ax.annotate(r["label"], (f / float(r["dram_bytes"]), f / float(r["bench_time_s"])), fontsize=7,
-                xytext=(4, 4), textcoords="offset points")
+                xytext=(4, 4) if n == 0 else (-6, 8 * n - 12), ha="left" if n == 0 else "right", textcoords="offset points")
 for j, s in enumerate(shapes):
     ax.scatter([], [], color=f"C{j}", label="x".join(s))
 for k, i in enumerate(impls):
