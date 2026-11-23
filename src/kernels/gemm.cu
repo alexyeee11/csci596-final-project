@@ -103,16 +103,43 @@ __global__ void __launch_bounds__(256) gemm_regtile_k(int ta, int tb, int M, int
    so a transposed operand is just a col_major fragment view. Rows are padded by 8 halves, which keeps ldm a
    multiple of 8 and every fragment pointer 32-byte aligned (all offsets are multiples of 16 halves), whatever
    the global shape or leading dimension.
-   ponytail: scalar 2-byte staging loads with bounds checks; vectorize for aligned shapes if bench_gemm needs it. */
+   ponytail: one K tile in flight per block; register double buffering of the next tile, then larger block
+   tiles, are what is left before chasing cuBLAS. */
 #define WT 64
 #define WK 32
-#define WPAD 8
+#define WPAD 8  /* smem row strides (WK or WT) + WPAD = 40 and 72 halves = 80 and 144 bytes: 16-byte multiples */
 #define WLDC (WT + 4)  /* FP32 epilogue tile row stride: multiple of 4 floats, fragment offsets multiples of 8 */
 
+/* 16-byte path: each thread moves R*C/1024 uint4s (8 halves each). The tile must lie inside the matrix, and g
+   and cols must keep every row start 16-byte aligned (c0 is a multiple of WK, so of 8). Load and store are
+   separate so the load can be issued a K step early. */
+template <int R, int C>
+__device__ __forceinline__ void wmma_ld(uint4* v, const __half* g, int cols, int r0, int c0) {
+#pragma unroll
+  for (int t = 0; t < R * C / 1024; t++) {
+    int idx = threadIdx.x + t * 128, r = idx / (C / 8), c = idx % (C / 8) * 8;
+    v[t] = *(const uint4*)(g + (size_t)(r0 + r) * cols + c0 + c);
+  }
+}
+template <int R, int C>
+__device__ __forceinline__ void wmma_st(__half* s, const uint4* v) {
+#pragma unroll
+  for (int t = 0; t < R * C / 1024; t++) {
+    int idx = threadIdx.x + t * 128, r = idx / (C / 8), c = idx % (C / 8) * 8;
+    *(uint4*)(s + r * (C + WPAD) + c) = v[t];
+  }
+}
+
 /* Copy the R x C tile at (r0, c0) of a rows x cols row-major matrix into s (row stride C + WPAD), zero-filling
-   outside the matrix. */
+   outside the matrix. The path choice depends only on kernel arguments and the tile, so it is block-uniform. */
 template <int R, int C>
 __device__ __forceinline__ void wmma_stage(__half* s, const __half* g, int rows, int cols, int r0, int c0) {
+  if (r0 + R <= rows && c0 + C <= cols && cols % 8 == 0 && ((size_t)g & 15) == 0) {
+    uint4 v[R * C / 1024];
+    wmma_ld<R, C>(v, g, cols, r0, c0);
+    wmma_st<R, C>(s, v);
+    return;
+  }
 #pragma unroll
   for (int t = 0; t < R * C / 128; t++) {
     int idx = threadIdx.x + t * 128, r = idx / C, c = idx % C;

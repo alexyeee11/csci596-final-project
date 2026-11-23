@@ -28,8 +28,9 @@ static void ref(int ta, int tb, int M, int N, int K, float alpha, const float* A
 }
 
 /* fp16: impl is a gemmh_impl, and A and B are rounded to FP16 before both the GPU call and the reference,
-   so only FP32 accumulation order separates the two. Returns 1 on mismatch. */
-static int run_case(int fp16, int impl, const char* name, int M, int N, int K, int ta, int tb) {
+   so only FP32 accumulation order separates the two. A is passed off elements past an aligned allocation.
+   Returns 1 on mismatch. */
+static int run_case(int fp16, int impl, const char* name, int M, int N, int K, int ta, int tb, int off) {
   size_t na = (size_t)M * K, nb = (size_t)K * N, nc = (size_t)M * N, es = fp16 ? sizeof(__half) : sizeof(float);
   float *hA = (float*)malloc(na * 4), *hB = (float*)malloc(nb * 4), *hC = (float*)malloc(nc * 4);
   float *want = (float*)malloc(nc * 4), *scale = (float*)malloc(nc * 4);
@@ -40,20 +41,22 @@ static int run_case(int fp16, int impl, const char* name, int M, int N, int K, i
   ref(ta, tb, M, N, K, 1.5f, hA, hB, 0.5f, want, scale);
   void *dA, *dB;
   float* dC;
-  CUDA_CHECK(cudaMalloc(&dA, na * es));
+  CUDA_CHECK(cudaMalloc(&dA, (na + off) * es));
+  char* dAo = (char*)dA + off * es;
   CUDA_CHECK(cudaMalloc(&dB, nb * es));
   CUDA_CHECK(cudaMalloc(&dC, nc * 4));
-  CUDA_CHECK(cudaMemcpy(dA, fp16 ? (void*)hAh : (void*)hA, na * es, cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(dAo, fp16 ? (void*)hAh : (void*)hA, na * es, cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemcpy(dB, fp16 ? (void*)hBh : (void*)hB, nb * es, cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemcpy(dC, hC, nc * 4, cudaMemcpyHostToDevice));
-  if (fp16) gemm_h((gemmh_impl)impl, ta, tb, M, N, K, 1.5f, (const __half*)dA, (const __half*)dB, 0.5f, dC);
-  else      gemm((gemm_impl)impl, ta, tb, M, N, K, 1.5f, (const float*)dA, (const float*)dB, 0.5f, dC);
+  if (fp16) gemm_h((gemmh_impl)impl, ta, tb, M, N, K, 1.5f, (const __half*)dAo, (const __half*)dB, 0.5f, dC);
+  else      gemm((gemm_impl)impl, ta, tb, M, N, K, 1.5f, (const float*)dAo, (const float*)dB, 0.5f, dC);
   CUDA_CHECK(cudaMemcpy(hC, dC, nc * 4, cudaMemcpyDeviceToHost));
   int fail = 0;
   for (size_t i = 0; i < nc && !fail; i++) {
     float tol = fp16 ? 1e-3f * scale[i] : 1e-3f * (1.f + fabsf(want[i]));
     if (fabsf(hC[i] - want[i]) > tol) {
-      printf("FAIL %s %dx%dx%d ta=%d tb=%d at %zu: got %g want %g\n", name, M, N, K, ta, tb, i, hC[i], want[i]);
+      printf("FAIL %s %dx%dx%d ta=%d tb=%d off=%d at %zu: got %g want %g\n", name, M, N, K, ta, tb, off, i, hC[i],
+             want[i]);
       fail = 1;
     }
   }
@@ -70,7 +73,7 @@ static int run_all(int fp16, int impl, const char* name) {
   for (int s = 0; s < 5; s++)
     for (int ta = 0; ta < 2; ta++)
       for (int tb = 0; tb < 2; tb++)
-        fails += run_case(fp16, impl, name, shapes[s][0], shapes[s][1], shapes[s][2], ta, tb);
+        fails += run_case(fp16, impl, name, shapes[s][0], shapes[s][1], shapes[s][2], ta, tb, 0);
   return fails;
 }
 
@@ -87,6 +90,11 @@ int main(void) {
   for (int impl = 0; impl <= GEMM_CUBLAS; impl++) fails += run_all(0, impl, names[impl]);
   if (gemm_h_supported()) {
     fails += run_all(1, GEMMH_WMMA, "wmma");
+    /* 128^3: every wmma tile takes the 16-byte path; A one half off an aligned allocation forces the scalar
+       path for every A tile of the same shape */
+    for (int ta = 0; ta < 2; ta++)
+      for (int tb = 0; tb < 2; tb++)
+        for (int off = 0; off < 2; off++) fails += run_case(1, GEMMH_WMMA, "wmma", 128, 128, 128, ta, tb, off);
     fails += run_all(1, GEMMH_CUBLAS, "cublas_fp16");
   } else {
     printf("test_gemm: fp16 cases skipped (needs sm_70+)\n");

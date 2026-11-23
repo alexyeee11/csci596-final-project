@@ -16,6 +16,8 @@ set -uo pipefail
 source scripts/env.sh
 nvidia-smi --query-gpu=name --format=csv,noheader
 make clean && make gpu || exit 1
+echo "== wmma register/spill report (sm_70; want 0 bytes spill for gemm_wmma_k) =="
+nvcc -O2 -gencode arch=compute_70,code=sm_70 -Isrc -Xptxas -v -c src/kernels/gemm.cu -o /dev/null
 status=0
 echo "== test_gemm =="
 ./bin/test_gemm || status=1
