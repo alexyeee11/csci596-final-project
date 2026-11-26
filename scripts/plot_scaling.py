@@ -10,7 +10,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 d = sys.argv[1]
-NS = (1, 2, 4, 8)
+# 16 GPUs only if that job ran (it needs 8 nodes and about 160 SU per minute)
+NS = tuple(n for n in (1, 2, 4, 8, 16) if n <= 8 or os.path.exists(f"{d}/strong_n{n}_off.log"))
 rows = []
 for kind in ("strong", "weak"):
     for ov in ("off", "on"):
@@ -43,7 +44,8 @@ for ax in (a, b):
     ax.set_xticks(NS, [str(n) for n in NS])
     ax.set_xticks([], minor=True)  # no 3x10^0-style labels between 1, 2, 4, 8
     ax.legend()
-a.set_yticks([0.1, 0.2, 0.5, 1, 2, 4, 8], ["0.1", "0.2", "0.5", "1", "2", "4", "8"])
+yt = [0.05, 0.1, 0.2, 0.5, 1, 2, 4, 8, 16]
+a.set_yticks(yt, [f"{t:g}" for t in yt])
 a.set_yticks([], minor=True)
 w = 0.38
 for j, ov in enumerate(("off", "on")):
