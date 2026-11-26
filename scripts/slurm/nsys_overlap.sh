@@ -10,8 +10,10 @@
 #SBATCH --output=logs/%x-%j.out
 # E6 (Milestone 4b Task 2): Nsight Systems timelines of 10 data-parallel steps on 2 P100s, overlap off and on
 # (--overlap --bucket-mb $BUCKET_MB, default 25). One report per rank and run:
-#   logs/nsys/timeline_{off,on}.<rank>.nsys-rep (not committed; copy them to the laptop and screenshot one step in the
-#   Nsight Systems GUI as results/overlap/timeline_{off,on}.png).
+#   logs/nsys/timeline_{off,on}.<rank>.nsys-rep (not committed). Then, on the login node (a format conversion):
+#     for f in logs/nsys/timeline_*.0.nsys-rep; do $CUDA_HOME/bin/nsys export --type sqlite -o ${f%.nsys-rep}.sqlite $f; done
+#   copy the two .sqlite files to the laptop and draw one step of each with scripts/plot_timeline.py into
+#   results/overlap/timeline_{off,on}.png (the .nsys-rep files also open in the Nsight Systems GUI).
 # usage: mkdir -p logs && sbatch --account=<acct> scripts/slurm/nsys_overlap.sh
 # cost: ~4 P100 SU per GPU-minute + 1 SU per CPU + 1 SU per 4 GB; ~20 SU per minute, a few minutes in all
 set -euo pipefail
